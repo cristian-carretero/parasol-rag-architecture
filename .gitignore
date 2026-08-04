@@ -1,5 +1,16 @@
-data/
-__pycache__/
-data/
-__pycache__/
+# Virtual environment
 .venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Data (do not version heavy files)
+data/raw/
+data/processed/
+
+# System or IDE files
+.DS_Store
+.vscode/
+.idea/
