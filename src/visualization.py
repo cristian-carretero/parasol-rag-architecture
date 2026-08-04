@@ -113,6 +113,9 @@ if __name__ == "__main__":
         logger.error(f"Directory {PROCESSED_DIR} not found. Run data_processing.py first.")
         raise FileNotFoundError(f"Directory {PROCESSED_DIR} not found.")
 
+    # =========================================================================
+    # 1. PRE-FILTER AUDIT (RAW DATASETS)
+    # =========================================================================
     device_dirs = [d.name for d in PROCESSED_DIR.iterdir() if d.is_dir()]
     processed_dfs = []
 
@@ -148,13 +151,38 @@ if __name__ == "__main__":
                 pd.to_datetime('22:00').time()
             )
         ]
-        logger.info(f"Applied daytime window filter: {len(jv_raw):,} / {initial_records:,} records retained.")
+        logger.info(f"Applied daytime window filter (Pre-Filter): {len(jv_raw):,} / {initial_records:,} records retained.")
 
-        # Execute pre-filter pipeline plotting and analysis
+        # Plot raw data distribution
         plot_voltage_span_distribution(
             jv_df=jv_raw,
             stage_name="Pre-Filter (Raw Data)",
             filename="voltage_span_pre_filter.png"
         )
     else:
-        logger.warning("No processed dataframes available for visualization.")
+        logger.warning("No raw dataframes available for Pre-Filter visualization.")
+
+    # =========================================================================
+    # 2. POST-FILTER AUDIT (CLEAN DATASET)
+    # =========================================================================
+    filtered_parquet_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
+
+    if filtered_parquet_path.exists():
+        logger.info(f"Loading post-filter dataset from: {filtered_parquet_path}")
+        jv_filtered = pd.read_parquet(filtered_parquet_path)
+
+        # Retain only physically valid curves (is_curve_valid == 1)
+        jv_clean = jv_filtered[jv_filtered['is_curve_valid'] == 1].copy()
+        logger.info(f"Retained {len(jv_clean):,} valid datapoints for Post-Filter plot.")
+
+        # Plot clean data distribution
+        plot_voltage_span_distribution(
+            jv_df=jv_clean,
+            stage_name="Post-Filter (Clean Data)",
+            filename="voltage_span_post_filter.png"
+        )
+    else:
+        logger.warning(
+            f"Filtered dataset not found at {filtered_parquet_path}. "
+            "Run src/filtering.py first to generate the post-filter plot."
+        )
