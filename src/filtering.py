@@ -26,8 +26,7 @@ def _process_single_cell(
     freeze_thresh: int, 
     i_span_thresh: float,
     corruption_tol: float = 0.90,
-    spike_tol: int = 5,
-    noise_tol: float = 4.0
+    spike_tol: int = 2
 ) -> pd.DataFrame:
     """
     Core engine to apply physical, range, and structural filters to a single cell's dataset.
@@ -75,31 +74,21 @@ def _process_single_cell(
     # --- 5. TIME & LENGTH FILTERS ---
     df_c['is_in_time'] = (df_c['Timestamp'].dt.hour >= 6) & (df_c['Timestamp'].dt.hour <= 22)
     is_curve_in_time_window = df_c.groupby('curve')['is_in_time'].transform('all')
-    curve_len = df_c.groupby('curve')['Voltage_V'].transform('size')
 
     df_c['is_low_voltage'] = df_c['v_span_mV'] <= v_span_thresh
     df_c['is_low_current'] = df_c['i_span_A'] <= i_span_thresh
     df_c['is_night_time'] = ~is_curve_in_time_window
-    df_c['is_short_curve'] = curve_len < 200
 
     # --- 6. ARTIFACT & INTEGRITY FILTERS ---
     # A) Outliers Filter
     df_c['d_current_abs'] = df_c.groupby('curve')['Current_A'].diff().abs().bfill()
-    df_c['is_outlier_point'] = (df_c['d_current_abs'] / (df_c['i_span_A'] + 1e-9)) > 0.3
+    df_c['is_outlier_point'] = (df_c['d_current_abs'] / (df_c['i_span_A'] + 1e-9)) > 0.15
     outlier_count = df_c.groupby('curve')['is_outlier_point'].transform('sum')
     
     df_c['is_spike_error'] = (outlier_count > spike_tol)
     df_c = df_c[~(df_c['is_outlier_point'] & (~df_c['is_spike_error']))].copy()
 
-    # B) Contact Noise (Path Ratio)
-    df_c['smoothed_current'] = df_c.groupby(['curve', 'is_reverse'])['Current_A'].transform(lambda x: x.rolling(window=2, center=True, min_periods=1).median())
-    df_c['d_current_dir'] = df_c.groupby(['curve', 'is_reverse'])['smoothed_current'].diff().abs()
-    path_length = df_c.groupby(['curve', 'is_reverse'])['d_current_dir'].transform('sum')
-    
-    df_c['path_ratio'] = path_length / (df_c['i_span_A'] + 1e-9)
-    df_c['is_contact_noise'] = df_c.groupby('curve')['path_ratio'].transform('max') > noise_tol
-
-    # C) Structural Symmetry Filter
+    # B) Structural Symmetry Filter
     fwd_pts = df_c[df_c['is_reverse'] == 0].groupby('curve')['Voltage_V'].count()
     rev_pts = df_c[df_c['is_reverse'] == 1].groupby('curve')['Voltage_V'].count()
     df_c['fwd_len'] = df_c['curve'].map(fwd_pts).fillna(0)
@@ -108,19 +97,19 @@ def _process_single_cell(
     ratio = df_c['fwd_len'] / (df_c['rev_len'] + 1e-9)
     df_c['is_asymmetric'] = (df_c['fwd_len'] == 0) | (df_c['rev_len'] == 0) | (ratio < 0.85) | (ratio > 1.15)
 
-    # D) Hysteresis Integrity Filter (Mean Collapse)
+    # C) Hysteresis Integrity Filter (Mean Collapse)
     fwd_mean = df_c[df_c['is_reverse'] == 0].groupby('curve')['Current_A'].mean()
     rev_mean = df_c[df_c['is_reverse'] == 1].groupby('curve')['Current_A'].mean()
     df_c['fwd_mean'] = df_c['curve'].map(fwd_mean).fillna(0)
     df_c['rev_mean'] = df_c['curve'].map(rev_mean).fillna(0)
     
-    df_c['is_mean_mismatch'] = (df_c['fwd_mean'] - df_c['rev_mean']).abs() / (df_c[['fwd_mean', 'rev_mean']].max(axis=1) + 1e-9) > 0.6
+    df_c['is_mean_mismatch'] = (df_c['fwd_mean'] - df_c['rev_mean']).abs() / (df_c[['fwd_mean', 'rev_mean']].max(axis=1) + 1e-9) > 0.45
 
     # --- 7. FINAL VALIDITY CRITERION ---
     invalid_mask = (
         df_c['is_low_voltage'] | df_c['is_low_current'] | df_c['is_night_time'] | 
-        df_c['is_short_curve'] | df_c['is_curve_frozen'] | df_c['is_corrupted'] | 
-        df_c['is_spike_error'] | df_c['is_contact_noise'] | df_c['is_asymmetric'] | 
+        df_c['is_curve_frozen'] | df_c['is_corrupted'] | 
+        df_c['is_spike_error'] | df_c['is_asymmetric'] | 
         df_c['is_mean_mismatch']
     )
     df_c['is_curve_valid'] = (~invalid_mask).astype('int8')
@@ -130,9 +119,10 @@ def _process_single_cell(
 
 def process_all_jv_curves(
     raw_dfs_dict: dict[str, pd.DataFrame], 
-    v_span_threshold_mv: int = 200, 
+    v_span_threshold_mv: int = 50, 
     freeze_run_threshold: int = 15, 
-    i_span_threshold_A: float = 0.001
+    i_span_threshold_A: float = 0.0001,
+    spike_tol: int = 2
 ) -> pd.DataFrame:
     """
     Orchestrates the filtering pipeline across all provided cell DataFrames.
@@ -151,7 +141,8 @@ def process_all_jv_curves(
             cell_id=cell_id, 
             v_span_thresh=v_span_threshold_mv, 
             freeze_thresh=freeze_run_threshold, 
-            i_span_thresh=i_span_threshold_A
+            i_span_thresh=i_span_threshold_A,
+            spike_tol=spike_tol
         )
         processed_dfs.append(cleaned_df)
         gc.collect()
@@ -161,31 +152,31 @@ def process_all_jv_curves(
     jv_all = pd.concat(processed_dfs, axis=0, ignore_index=True)
     jv_all['id_curve'] = jv_all.groupby(['cell_name', 'curve']).ngroup()
 
-    # Diagnostics reporting
+    # --- DIAGNOSTICS ---
     logger.info("Generating global diagnostics report...")
     summary = jv_all.groupby(['cell_name', 'curve']).first()
 
     try:
-        val_counts = summary.groupby(['cell_name', 'is_reverse'])['is_curve_valid'].sum().unstack(fill_value=0)
-        val_counts = val_counts.rename(columns={0: 'Forward', 1: 'Reverse'})
+        val_counts = summary.groupby('cell_name')['is_curve_valid'].agg(['count', 'sum'])
+        val_counts.columns = ['Total Cycles Detected', 'Valid Cycles']
         
         discard_cols = [
-            'is_low_voltage', 'is_low_current', 'is_night_time', 'is_short_curve', 
-            'is_curve_frozen', 'is_corrupted', 'is_spike_error', 'is_contact_noise', 
+            'is_low_voltage', 'is_low_current', 'is_night_time', 
+            'is_curve_frozen', 'is_corrupted', 'is_spike_error', 
             'is_asymmetric', 'is_mean_mismatch'
         ]
         
         report = (
             f"\n=== FINAL DIAGNOSTICS ===\n"
-            f"Total detected curves: {len(summary)}\n\n"
-            f"Valid Curves by Direction:\n{val_counts}\n\n"
-            f"Global Rejection Triggers:\n{summary[discard_cols].sum().to_string()}"
+            f"Total cycles detected across all cells: {len(summary)}\n\n"
+            f"Cycle Yield by Cell:\n{val_counts}\n\n"
+            f"Global Rejection Triggers (Applied per cycle):\n{summary[discard_cols].sum().to_string()}"
         )
         logger.info(report)
         
     except Exception as e:
         logger.warning(f"Detailed diagnostics output failed: {e}")
-
+        
     warnings.filterwarnings('default', category=RuntimeWarning)
     return jv_all
 
@@ -266,7 +257,12 @@ if __name__ == "__main__":
 
     if raw_data_dict:
         # 1. Execute the core filtering engine
-        jv_dataset_filtered = process_all_jv_curves(raw_data_dict, v_span_threshold_mv=200)
+        jv_dataset_filtered = process_all_jv_curves(
+            raw_dfs_dict=raw_data_dict,
+            v_span_threshold_mv=50,
+            i_span_threshold_A=0.0001,
+            spike_tol=2
+        )
 
         # 2. Output final audit metrics
         logger.info("\n--- PIPELINE YIELD AUDIT ---")
