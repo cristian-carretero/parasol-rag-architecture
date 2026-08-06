@@ -187,8 +187,14 @@ def train_kmedoids_pipeline(
     jv_master_labeled = jv_master.copy()
     if 'label_curve' in jv_master_labeled.columns:
         jv_master_labeled.drop('label_curve', axis=1, inplace=True)
-    jv_master_labeled = jv_master_labeled.merge(labels_bridge, on=['cell_id', 'curve'], how='inner')
+        
+    # Crucial fix: left merge retains all original curves, including those failing normalization or tagged as outliers
+    jv_master_labeled = jv_master_labeled.merge(labels_bridge, on=['cell_id', 'curve'], how='left')
+    
+    # Fill unclassified curves (outliers and invalid sweeps) with -1
+    jv_master_labeled['label_curve'] = jv_master_labeled['label_curve'].fillna(-1).astype(int)
 
+    logger.info(f"Assigned label -1 to {sum(jv_master_labeled['label_curve'] == -1)} anomalous or unparseable curves.")
     logger.info("Pipeline successfully completed.")
     
     return {
@@ -216,3 +222,40 @@ def get_optimal_k(X_pca: np.ndarray, max_k: int = 8, sample_size: int = 2000) ->
     best_k = k_range[best_idx]
     
     return best_k
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+    
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    
+    PROCESSED_DIR = Path("data/processed/outdoor")
+    filtered_parquet_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
+    
+    if not filtered_parquet_path.exists():
+        logger.error(f"Filtered dataset not found at: {filtered_parquet_path}. Execution aborted.")
+    else:
+        logger.info("Initializing clustering pipeline execution...")
+        logger.info("Loading filtered dataset...")
+        jv_clean = pd.read_parquet(filtered_parquet_path)
+        
+        curves_norm = normalize_dataset(jv_clean, n_points=50)
+        
+        X_all = np.stack(curves_norm.tolist())
+        num_pca = get_optimal_pca_components(X_all, target_variance=0.90)
+        
+        X_temp = np.stack(curves_norm.sample(min(1000, len(curves_norm)), random_state=42).tolist())
+        X_pca_temp = PCA(n_components=num_pca, random_state=42).fit_transform(X_temp)
+        num_clusters = get_optimal_k(X_pca_temp, max_k=8)
+
+        ml_results = train_kmedoids_pipeline(
+            jv_master=jv_clean,
+            curves_normalized=curves_norm,
+            n_points=50,
+            n_clusters=num_clusters,
+            n_pca_components=num_pca
+        )
+        
+        output_path = PROCESSED_DIR / "jv_dataset_labeled.parquet"
+        ml_results["jv_labeled"].to_parquet(output_path, index=False)
+        logger.info(f"Labeled dataset successfully exported to: {output_path}")

@@ -1,0 +1,18 @@
+# Data Processing & Core Math
+numpy
+pandas
+scipy
+pyarrow       
+
+# Machine Learning & Clustering
+scikit-learn
+scikit-learn-extra  
+xgboost             
+
+# Data Visualization
+matplotlib
+seaborn
+plotly
+
+# Model Serialization & MLOps
+joblib
