@@ -69,7 +69,7 @@ def normalize_dataset(jv_df: pd.DataFrame, n_points: int = 50) -> pd.Series:
     """
     Applies normalization globally and drops non-interpolable curves.
     """
-    logger.info("Normalizing dataset globally...")
+    logger.info("Applying local shape normalization to all curves...")
     
     # Explicit wrapper to help Pylance understand the DataFrame passing
     def _wrapper(df: Any) -> np.ndarray:
@@ -171,7 +171,7 @@ def train_kmedoids_pipeline(
     v_norm = np.linspace(0, 1, n_points)
     centers_orig = pca.inverse_transform(cluster_centers)
     
-    pseudo_ff = [np.max(v_norm * center[:n_points]) + np.max(v_norm * center[n_points:]) for center in centers_orig]
+    pseudo_ff = [(np.max(v_norm * center[:n_points]) + np.max(v_norm * center[n_points:])) / 2 for center in centers_orig]
     sorted_indices = np.argsort(pseudo_ff)[::-1]
     label_mapping = {old_label: new_label for new_label, old_label in enumerate(sorted_indices)}
 
@@ -180,15 +180,21 @@ def train_kmedoids_pipeline(
     labels = np.array([label_mapping[l] for l in labels_all_raw])
     kmedoids.cluster_centers_ = cluster_centers[sorted_indices]
 
+    power_curves = X_all_cleaned * np.tile(v_norm, 2)
+    pff_all = (np.max(power_curves[:, :n_points], axis=1) + np.max(power_curves[:, n_points:], axis=1)) / 2
+
     # 4. Consolidate Labeled Dataset
     labels_bridge = curves_normalized_cleaned.index.to_frame(index=False)
     labels_bridge['label_curve'] = labels
+    labels_bridge['pseudo_FF'] = pff_all
     
     jv_master_labeled = jv_master.copy()
     if 'label_curve' in jv_master_labeled.columns:
         jv_master_labeled.drop('label_curve', axis=1, inplace=True)
+    if 'pseudo_FF' in jv_master_labeled.columns:
+        jv_master_labeled.drop('pseudo_FF', axis=1, inplace=True)
         
-    # Crucial fix: left merge retains all original curves, including those failing normalization or tagged as outliers
+    # Left merge retains all original curves, including those failing normalization or tagged as outliers
     jv_master_labeled = jv_master_labeled.merge(labels_bridge, on=['cell_id', 'curve'], how='left')
     
     # Fill unclassified curves (outliers and invalid sweeps) with -1
