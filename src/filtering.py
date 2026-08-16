@@ -7,6 +7,7 @@ from pathlib import Path
 import logging
 import warnings
 import gc
+import json
 import pandas as pd
 import numpy as np
 
@@ -29,7 +30,20 @@ def _process_single_cell(
     spike_tol: int = 2
 ) -> pd.DataFrame:
     """
-    Core engine to apply physical, range, and structural filters to a single cell's dataset.
+    Applies a comprehensive physical, range, and structural filtering topology to a single cell's dataset.
+    
+    Args:
+        df: Raw DataFrame containing J-V telemetry.
+        name: Device identifier.
+        cell_id: Numeric mapping for the device.
+        v_span_thresh: Minimum required voltage span (mV).
+        freeze_thresh: Rolling window size for hardware freeze detection.
+        i_span_thresh: Minimum required current span (A).
+        corruption_tol: Maximum allowable percentage of negative current readings.
+        spike_tol: Maximum allowable outlier spikes per curve.
+        
+    Returns:
+        pd.DataFrame: Processed dataset with the 'is_curve_valid' boolean mask applied.
     """
     df_c = df.copy()
     
@@ -42,7 +56,7 @@ def _process_single_cell(
     df_c['Timestamp'] = pd.to_datetime(df_c['Timestamp'])
 
     # --- 1. CURVE IDENTIFICATION ---
-    # A new curve strictly begins when the scan sequence starts in 'Reverse'
+    # A new cycle strictly initiates upon detecting a 'Reverse' scan direction
     is_reverse_start = (df_c['ScanDirection'] == 'Reverse') & (df_c['ScanDirection'].shift(1) != 'Reverse')
     is_reverse_start.iloc[0] = True
     
@@ -71,7 +85,7 @@ def _process_single_cell(
     df_c['is_curve_frozen'] = ((v_span_window <= 1e-4).groupby(df_c['curve']).transform('mean') > 0.9) | \
                               ((i_span_window <= 1e-6).groupby(df_c['curve']).transform('mean') > 0.9)
 
-    # --- 5. TIME & LENGTH FILTERS ---
+    # --- 5. TEMPORAL & BOUNDARY FILTERS ---
     df_c['is_in_time'] = (df_c['Timestamp'].dt.hour >= 6) & (df_c['Timestamp'].dt.hour <= 22)
     is_curve_in_time_window = df_c.groupby('curve')['is_in_time'].transform('all')
 
@@ -79,8 +93,8 @@ def _process_single_cell(
     df_c['is_low_current'] = df_c['i_span_A'] <= i_span_thresh
     df_c['is_night_time'] = ~is_curve_in_time_window
 
-    # --- 6. ARTIFACT & INTEGRITY FILTERS ---
-    # A) Outliers Filter
+    # --- 6. ARTIFACT & STRUCTURAL INTEGRITY FILTERS ---
+    # A) Outlier Spike Filter
     df_c['d_current_abs'] = df_c.groupby('curve')['Current_A'].diff().abs().bfill()
     df_c['is_outlier_point'] = (df_c['d_current_abs'] / (df_c['i_span_A'] + 1e-9)) > 0.15
     outlier_count = df_c.groupby('curve')['is_outlier_point'].transform('sum')
@@ -97,7 +111,7 @@ def _process_single_cell(
     ratio = df_c['fwd_len'] / (df_c['rev_len'] + 1e-9)
     df_c['is_asymmetric'] = (df_c['fwd_len'] == 0) | (df_c['rev_len'] == 0) | (ratio < 0.85) | (ratio > 1.15)
 
-    # C) Hysteresis Integrity Filter (Mean Collapse)
+    # C) Hysteresis Integrity Filter (Mean Discrepancy)
     fwd_mean = df_c[df_c['is_reverse'] == 0].groupby('curve')['Current_A'].mean()
     rev_mean = df_c[df_c['is_reverse'] == 1].groupby('curve')['Current_A'].mean()
     df_c['fwd_mean'] = df_c['curve'].map(fwd_mean).fillna(0)
@@ -105,7 +119,7 @@ def _process_single_cell(
     
     df_c['is_mean_mismatch'] = (df_c['fwd_mean'] - df_c['rev_mean']).abs() / (df_c[['fwd_mean', 'rev_mean']].max(axis=1) + 1e-9) > 0.45
 
-    # --- 7. FINAL VALIDITY CRITERION ---
+    # --- 7. FINAL VALIDITY MASK ---
     invalid_mask = (
         df_c['is_low_voltage'] | df_c['is_low_current'] | df_c['is_night_time'] | 
         df_c['is_curve_frozen'] | df_c['is_corrupted'] | 
@@ -125,15 +139,15 @@ def process_all_jv_curves(
     spike_tol: int = 2
 ) -> pd.DataFrame:
     """
-    Orchestrates the filtering pipeline across all provided cell DataFrames.
+    Orchestrates the artifact removal pipeline across all localized cell datasets.
     """
     warnings.filterwarnings('ignore', category=RuntimeWarning)
-    logger.info(f"Initiating physical filtering pipeline for {len(raw_dfs_dict)} cells...")
+    logger.info(f"Initializing physical filtering pipeline across {len(raw_dfs_dict)} detected devices...")
 
     processed_dfs = []
     
     for cell_id, (name, df) in enumerate(raw_dfs_dict.items()):
-        logger.info(f"Applying filter topology to cell: {name}")
+        logger.info(f"Executing filter topology on device: {name}")
         
         cleaned_df = _process_single_cell(
             df=df, 
@@ -147,35 +161,35 @@ def process_all_jv_curves(
         processed_dfs.append(cleaned_df)
         gc.collect()
 
-    # Consolidate dataset
-    logger.info("Concatenating processed chunks into global DataFrame...")
+    # Consolidate processed dataframes
+    logger.info("Concatenating processed chunks into a unified global DataFrame...")
     jv_all = pd.concat(processed_dfs, axis=0, ignore_index=True)
     jv_all['id_curve'] = jv_all.groupby(['cell_name', 'curve']).ngroup()
 
-    # --- DIAGNOSTICS ---
-    logger.info("Generating global diagnostics report...")
+    # --- DIAGNOSTICS REPORTING ---
+    logger.info("Aggregating global diagnostics report...")
     summary = jv_all.groupby(['cell_name', 'curve']).first()
 
     try:
         val_counts = summary.groupby('cell_name')['is_curve_valid'].agg(['count', 'sum'])
-        val_counts.columns = ['Total Cycles Detected', 'Valid Cycles']
+        val_counts.columns = ['Total Cycles Detected', 'Valid Cycles Retained']
         
         discard_cols = [
             'is_low_voltage', 'is_low_current', 'is_night_time', 
             'is_curve_frozen', 'is_corrupted', 'is_spike_error', 
-            'is_asymmetric', 'is_mean_mismatch'
+            'is_asymmetric', 'is_mean_mismatch'  
         ]
         
         report = (
-            f"\n=== FINAL DIAGNOSTICS ===\n"
-            f"Total cycles detected across all cells: {len(summary)}\n\n"
-            f"Cycle Yield by Cell:\n{val_counts}\n\n"
-            f"Global Rejection Triggers (Applied per cycle):\n{summary[discard_cols].sum().to_string()}"
+            f"\n=== QUALITY CONTROL METRICS ===\n"
+            f"Aggregate cycles evaluated globally: {len(summary)}\n\n"
+            f"Cycle Yield Distribution by Device:\n{val_counts}\n\n"
+            f"Global Rejection Frequencies (Applied per cycle):\n{summary[discard_cols].sum().to_string()}"
         )
         logger.info(report)
         
     except Exception as e:
-        logger.warning(f"Detailed diagnostics output failed: {e}")
+        logger.warning(f"Diagnostics aggregation failed: {e}")
         
     warnings.filterwarnings('default', category=RuntimeWarning)
     return jv_all
@@ -183,52 +197,47 @@ def process_all_jv_curves(
 
 def analyze_curve_timings(jv_df: pd.DataFrame) -> None:
     """
-    Extracts chronological statistics: average measurement durations and idle times.
+    Extracts and logs chronological metadata, including sweep durations and hardware idle intervals.
     """
-    logger.info("Analyzing chronometry (measurement durations & idle intervals)...")
+    logger.info("Computing chronometric metadata (sweep durations and sensor idle intervals)...")
     
-    # Calculate boundary timestamps per curve
     all_curves_stats = jv_df.groupby(['cell_name', 'id_curve'])['Timestamp'].agg(['min', 'max']).sort_values('min')
     all_curves_stats['is_valid'] = jv_df.groupby(['cell_name', 'id_curve'])['is_curve_valid'].first()
 
     global_durations, global_intervals = [], []
-    report_lines = ["\n=== TIME ANALYSIS PER CELL ==="]
+    report_lines = ["\n=== TEMPORAL ANALYSIS PER DEVICE ==="]
 
     for cell in jv_df['cell_name'].unique():
         cell_stats = all_curves_stats.loc[cell]
         
-        # Idle intervals (excluding massive gaps > 1 hour)
         intervals = cell_stats['min'].diff().dt.total_seconds()
         intervals_clean = intervals[intervals < 3600]
         avg_interval = intervals_clean.mean()
         global_intervals.extend(intervals_clean.dropna().tolist())
 
-        # Sweep duration (valid curves only)
         valid_stats = cell_stats[cell_stats['is_valid'] == 1]
         durations = (valid_stats['max'] - valid_stats['min']).dt.total_seconds()
         avg_duration = durations.mean()
         global_durations.extend(durations.dropna().tolist())
 
-        # Capacity metrics
         total_valid = len(valid_stats)
         valid_df = jv_df[(jv_df['cell_name'] == cell) & (jv_df['is_curve_valid'] == 1)]
         max_daily = valid_df.set_index('Timestamp').resample('D')['id_curve'].nunique().max() if not valid_df.empty else 0
 
-        # Build report
         report_lines.extend([
             f"[{cell}]",
-            f"  -> Valid curves detected: {total_valid}",
-            f"  -> Avg duration (Rev+Fwd): {avg_duration:.2f} s" if total_valid > 0 else "  -> Avg duration: N/A",
-            f"  -> Avg time between sweeps: {avg_interval:.2f} s" if not np.isnan(avg_interval) else "  -> Avg time between sweeps: N/A",
-            f"  -> Max daily valid curves: {max_daily}\n"
+            f"  -> Valid cycles retained: {total_valid}",
+            f"  -> Mean duration (Rev+Fwd): {avg_duration:.2f} s" if total_valid > 0 else "  -> Mean duration: N/A",
+            f"  -> Mean idle interval: {avg_interval:.2f} s" if not np.isnan(avg_interval) else "  -> Mean idle interval: N/A",
+            f"  -> Peak daily cycle volume: {max_daily}\n"
         ])
 
     report_lines.extend([
-        "=" * 35,
-        "=== AGGREGATED GLOBAL AVERAGES ===",
-        f"Global Sweep Duration: {np.mean(global_durations):.2f} s" if global_durations else "Global Sweep Duration: N/A",
-        f"Global Hardware Idle:  {np.mean(global_intervals):.2f} s" if global_intervals else "Global Hardware Idle: N/A",
-        "=" * 35
+        "=" * 40,
+        "=== AGGREGATED GLOBAL TEMPORAL METRICS ===",
+        f"Mean Global Sweep Duration: {np.mean(global_durations):.2f} s" if global_durations else "Mean Global Sweep Duration: N/A",
+        f"Mean Global Hardware Idle:  {np.mean(global_intervals):.2f} s" if global_intervals else "Mean Global Hardware Idle: N/A",
+        "=" * 40
     ])
 
     logger.info("\n".join(report_lines))
@@ -238,13 +247,13 @@ if __name__ == "__main__":
     PROCESSED_DIR = Path("data/processed/outdoor")
     
     if not PROCESSED_DIR.exists():
-        logger.error(f"Directory missing: {PROCESSED_DIR}. Ensure data_processing.py ran successfully.")
+        logger.error(f"Target directory missing: {PROCESSED_DIR}. Verify execution of the upstream data processing module.")
         raise FileNotFoundError(f"Directory {PROCESSED_DIR} not found.")
 
     device_dirs = [d.name for d in PROCESSED_DIR.iterdir() if d.is_dir()]
     raw_data_dict = {}
 
-    logger.info(f"Discovered processed datasets for devices: {device_dirs}")
+    logger.info(f"Discovered processed datasets for localized devices: {device_dirs}")
     
     for name in device_dirs:
         parquet_path = PROCESSED_DIR / name / f"{name}_jv.parquet"
@@ -253,7 +262,7 @@ if __name__ == "__main__":
             if not df.empty:
                 raw_data_dict[name] = df
         else:
-            logger.warning(f"Expected Parquet file missing for device: {name}")
+            logger.warning(f"Expected Parquet artifact missing for device: {name}")
 
     if raw_data_dict:
         # 1. Execute the core filtering engine
@@ -265,21 +274,36 @@ if __name__ == "__main__":
         )
 
         # 2. Output final audit metrics
-        logger.info("\n--- PIPELINE YIELD AUDIT ---")
-        logger.info(f"Raw Datapoints (Rows):\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].count().to_string()}")
-        logger.info(f"Gross Sweeps Detected:\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].nunique().to_string()}")
-        logger.info(f"Net Valid Sweeps (Post-Filter):\n{jv_dataset_filtered[jv_dataset_filtered['is_curve_valid'] == 1].groupby('is_reverse')['id_curve'].nunique().to_string()}")
+        logger.info("\n--- PIPELINE RETENTION AUDIT ---")
+        logger.info(f"Raw Vector Dimensions (Rows):\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].count().to_string()}")
+        logger.info(f"Gross Cycle Count:\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].nunique().to_string()}")
+        logger.info(f"Net Valid Cycle Count (Post-Filter):\n{jv_dataset_filtered[jv_dataset_filtered['is_curve_valid'] == 1].groupby('is_reverse')['id_curve'].nunique().to_string()}")
 
         # 3. Analyze time dynamics
         analyze_curve_timings(jv_dataset_filtered)
         
-        # 4. Save the dataset to disk
-        output_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
-        logger.info(f"Saving filtered dataset to {output_path}...")
+        # --- MACHINE LEARNING METADATA EXPORT ---
+        logger.info("\n--- MACHINE LEARNING METADATA EXPORT ---")
         
-        # Save using pyarrow engine with snappy compression for max performance
+        valid_only_df = jv_dataset_filtered[jv_dataset_filtered['is_curve_valid'] == 1]
+        valid_counts_dict = valid_only_df.groupby('cell_name')['id_curve'].nunique().to_dict()
+        
+        logger.info("Volume of structurally sound curves available for ML training per device:")
+        for cell_name, count in valid_counts_dict.items():
+            logger.info(f"  {cell_name}: {count} curves")
+            
+        metadata_path = PROCESSED_DIR / "valid_curves_summary.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(valid_counts_dict, f, indent=4)
+        logger.info(f"Dataset structural metadata successfully serialized to: {metadata_path}")
+        # -------------------------------------------------------------
+        
+        # 4. Serialize dataset to disk
+        output_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
+        logger.info(f"Serializing filtered dataset artifact to {output_path}...")
+        
         jv_dataset_filtered.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
-        logger.info("Filtered dataset successfully saved! Pipeline complete.")
+        logger.info("Data engineering pipeline successfully terminated. Artifact serialized.")
         
     else:
-        logger.error("No valid Parquet files were loaded into memory.")
+        logger.error("Data ingestion failure: No valid Parquet artifacts were loaded into memory.")
