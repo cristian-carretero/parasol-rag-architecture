@@ -3,7 +3,8 @@ Module: src/survival_dataset.py
 Description: Feature engineering for Survival Analysis. 
 Groups J-V scans at the curve level, calculates accumulated environmental 
 stress doses via numerical integration, and aligns both sources while 
-maintaining strict temporal causality.
+maintaining strict temporal causality. Incorporates Magnus-Tetens approximation 
+for Absolute Humidity.
 """
 
 import pandas as pd
@@ -69,13 +70,26 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
         df_meteo['module_temp_dose'] = (df_meteo['ModuleTemp_C'] * df_meteo['delta_t_h']).cumsum()
         df_meteo['ambient_temp_dose'] = (df_meteo['AmbientTemp_C'] * df_meteo['delta_t_h']).cumsum()
         
-        # Humidity Dose = Sum(% * hours)
-        df_meteo['humidity_dose'] = (df_meteo['RelativeHumidity_pct'] * df_meteo['delta_t_h']).cumsum()
+        # --- ABSOLUTE HUMIDITY CALCULATION (Magnus-Tetens) ---
+        T_amb = df_meteo['AmbientTemp_C']
+        rh_pct = df_meteo['RelativeHumidity_pct']
+        
+        # 1. Saturation Vapor Pressure (p_sat) in hPa (mbar)
+        p_sat = 6.112 * np.exp((17.67 * T_amb) / (T_amb + 243.5))
+        
+        # 2. Actual Vapor Pressure (p_a) in hPa
+        p_a = p_sat * (rh_pct / 100.0)
+        
+        # 3. Absolute Humidity (AH) in g/m^3
+        df_meteo['AbsoluteHumidity_g_m3'] = (216.68 * p_a) / (T_amb + 273.15)
+        
+        # Absolute Humidity Dose = Sum(g/m3 * hours)
+        df_meteo['absolute_humidity_dose'] = (df_meteo['AbsoluteHumidity_g_m3'] * df_meteo['delta_t_h']).cumsum()
         
         # Select only the final stress metrics and the join key
         cols_meteo = [
             'Timestamp', 'exposure_time_h', 'irradiance_dose', 
-            'module_temp_dose', 'ambient_temp_dose', 'humidity_dose'
+            'module_temp_dose', 'ambient_temp_dose', 'absolute_humidity_dose'
         ]
         df_meteo_stress = df_meteo[cols_meteo]
         
@@ -127,7 +141,7 @@ if __name__ == "__main__":
         
         # Quick preview of the integrated data
         if not df_final.empty:
-            print("\nPreview of the integrated data:")
+            print("\nPreview of the integrated data (Now with Absolute Humidity):")
             print(df_final.head())
     else:
         logger.error(f"Labeled dataset not found at: {jv_labeled_file}")
