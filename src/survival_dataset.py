@@ -1,10 +1,10 @@
 """
 Module: src/survival_dataset.py
 Description: Feature engineering for Survival Analysis. 
-Groups J-V scans at the curve level, calculates accumulated environmental 
-stress doses via numerical integration, and aligns both sources while 
-maintaining strict temporal causality. Incorporates Magnus-Tetens approximation 
-for Absolute Humidity.
+Groups J-V scans at the curve level and aligns them with instantaneous 
+environmental stress metrics, maintaining strict temporal causality.
+Incorporates Magnus-Tetens approximation for Absolute Humidity.
+Cumulative doses have been removed to avoid age-bias in downstream ML models.
 """
 
 import pandas as pd
@@ -21,11 +21,15 @@ logger = logging.getLogger("SurvivalDataset")
 
 def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_path: Path) -> pd.DataFrame:
     """
-    Builds the design matrix (features) for the XGBoost predictive engine.
+    Builds the design matrix (features) for the XGBoost predictive engine,
+    focusing on instantaneous weather variables for downstream rolling-window processing.
     """
     # 1. Load the Labeled Dataset
     logger.info(f"Loading labeled J-V dataset from: {jv_labeled_path}")
     df_labeled = pd.read_parquet(jv_labeled_path)
+
+    df_labeled = df_labeled[df_labeled["label_curve"] != -1].copy()
+    logger.info(f"Filtered out invalid sweeps. Remaining records: {len(df_labeled)}")
     
     # 2. Group by curve (1 row = 1 J-V cycle)
     logger.info("Collapsing intra-day curves (dropping V, I, direction)...")
@@ -41,9 +45,9 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
     final_dfs = []
     unique_cells = df_curves['cell_name'].unique()
     
-    # 3. Iterative integration of meteorological variables per cell
+    # 3. Iterative alignment of meteorological variables per cell
     for cell in unique_cells:
-        logger.info(f"Processing meteorological integration for cell: {cell}")
+        logger.info(f"Processing meteorological alignment for cell: {cell}")
         
         # Filter curves for the current cell
         cell_curves = df_curves[df_curves['cell_name'] == cell].copy()
@@ -56,21 +60,11 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
         df_meteo = pd.read_parquet(meteo_path)
         df_meteo = df_meteo.sort_values('Timestamp').reset_index(drop=True)
         
-        # --- A. ACCUMULATED DOSES CALCULATION (Integration) ---
-        # Calculate delta t (in hours) relative to the previous row
+        # --- A. TIME METRICS (Kept for tracking, but not for ML accumulation) ---
         df_meteo['delta_t_h'] = df_meteo['Timestamp'].diff().dt.total_seconds().fillna(0) / 3600.0
-        
-        # Total exposure time since the first measurement
         df_meteo['exposure_time_h'] = df_meteo['delta_t_h'].cumsum()
         
-        # Irradiance Dose (Wh/m2) = Sum(W/m2 * hours)
-        df_meteo['irradiance_dose'] = (df_meteo['POA_Irradiance_W_m2'] * df_meteo['delta_t_h']).cumsum()
-        
-        # Thermal Dose = Sum(Temperature * hours)
-        df_meteo['module_temp_dose'] = (df_meteo['ModuleTemp_C'] * df_meteo['delta_t_h']).cumsum()
-        df_meteo['ambient_temp_dose'] = (df_meteo['AmbientTemp_C'] * df_meteo['delta_t_h']).cumsum()
-        
-        # --- ABSOLUTE HUMIDITY CALCULATION (Magnus-Tetens) ---
+        # --- B. ABSOLUTE HUMIDITY CALCULATION (Magnus-Tetens) ---
         T_amb = df_meteo['AmbientTemp_C']
         rh_pct = df_meteo['RelativeHumidity_pct']
         
@@ -83,17 +77,18 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
         # 3. Absolute Humidity (AH) in g/m^3
         df_meteo['AbsoluteHumidity_g_m3'] = (216.68 * p_a) / (T_amb + 273.15)
         
-        # Absolute Humidity Dose = Sum(g/m3 * hours)
-        df_meteo['absolute_humidity_dose'] = (df_meteo['AbsoluteHumidity_g_m3'] * df_meteo['delta_t_h']).cumsum()
-        
-        # Select only the final stress metrics and the join key
+        # Select instantaneous stress metrics and the join key
         cols_meteo = [
-            'Timestamp', 'exposure_time_h', 'irradiance_dose', 
-            'module_temp_dose', 'ambient_temp_dose', 'absolute_humidity_dose'
+            'Timestamp', 
+            'exposure_time_h', 
+            'POA_Irradiance_W_m2', 
+            'ModuleTemp_C', 
+            'AmbientTemp_C', 
+            'AbsoluteHumidity_g_m3'
         ]
         df_meteo_stress = df_meteo[cols_meteo]
         
-        # --- B. STRICT TEMPORAL CAUSAL JOIN ---
+        # --- C. STRICT TEMPORAL CAUSAL JOIN ---
         # For each J-V curve, find the meteorological record that occurred EXACTLY 
         # at that moment or the immediately preceding one (direction='backward')
         cell_merged = pd.merge_asof(
@@ -110,7 +105,7 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
         df_survival = pd.concat(final_dfs, ignore_index=True)
         
         # Drop records with no prior meteorological history
-        df_survival = df_survival.dropna(subset=['irradiance_dose'])
+        df_survival = df_survival.dropna(subset=['POA_Irradiance_W_m2'])
         
         logger.info(f"Dataset successfully assembled: {len(df_survival)} J-V events linked.")
         
@@ -141,7 +136,7 @@ if __name__ == "__main__":
         
         # Quick preview of the integrated data
         if not df_final.empty:
-            print("\nPreview of the integrated data (Now with Absolute Humidity):")
-            print(df_final.head())
+            print("\nPreview of the instantaneous integrated data:")
+            print(df_final[['cell_name', 'Timestamp', 'POA_Irradiance_W_m2', 'ModuleTemp_C', 'AbsoluteHumidity_g_m3']])
     else:
         logger.error(f"Labeled dataset not found at: {jv_labeled_file}")
