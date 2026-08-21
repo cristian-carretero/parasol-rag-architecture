@@ -6,6 +6,7 @@ Applies right-censoring at T80 and extracts physical root-cause diagnostics
 using Explainable AI (Surrogate Decision Trees).
 """
 
+import json
 import logging
 from pathlib import Path
 import numpy as np
@@ -218,7 +219,7 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: dict, burn_in
 
 def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day: float, window_days: float = 2.0):
     if pd.isna(threshold_day):
-        return None, None
+        return None, None, None
 
     # Isolate the critical temporal window
     window_data = df_twin[(df_twin['cell_name'] == cell_name) & 
@@ -230,7 +231,7 @@ def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day
     # Verify adequate variance to fit the tree
     if window_data[target].nunique() < 2:
         logger.warning(f"[{cell_name}] Insufficient variance to train surrogate tree.")
-        return None, None
+        return None, None, None
 
     X = window_data[features]
     y = window_data[target].astype(int)
@@ -239,7 +240,7 @@ def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day
     surrogate_tree = DecisionTreeClassifier(max_depth=3, class_weight='balanced', random_state=42)
     surrogate_tree.fit(X, y)
 
-    # Print extracted rules to the standard output
+    # Extract rules as text for console output and JSON logging
     tree_rules = export_text(surrogate_tree, feature_names=features, decimals=1)
     print("\n" + "="*85)
     print(f" SURROGATE RULE EXTRACTION: [{cell_name}] (Critical Window up to Day {threshold_day + window_days:.1f})")
@@ -247,7 +248,7 @@ def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day
     print(tree_rules)
     print("="*85 + "\n")
 
-    return surrogate_tree, features
+    return surrogate_tree, features, tree_rules
 
 
 # =====================================================================
@@ -287,12 +288,12 @@ if __name__ == "__main__":
         # 3. Diagnostic risk assessment generation
         summary_table = generate_diagnostic_summary(df_twin_results, death_days, burn_in_days=14)
 
-        print("\n" + "=" * 105)
-        print("                                PREMATURE FAILURE RISK ASSESSMENT                                ")
-        print("=" * 105)
+        print("\n" + "=" * 90)
+        print("                     PREMATURE FAILURE RISK ASSESSMENT                             ")
+        print("=" * 90)
         cols_to_show = ['Extrinsic_Failure', 'Alert_Freq_Pct', 'Threshold_15pct_Day', 'Survival_Days']
         print(summary_table[cols_to_show].to_string())
-        print("=" * 105)
+        print("=" * 90)
 
         print("""
 [DIAGNOSTIC METRICS LEGEND]
@@ -303,12 +304,41 @@ if __name__ == "__main__":
 • Threshold_15pct_Day : Exposure day when the cumulative anomaly density permanently exceeded 15% 
                         (enforcing a >=100 daylight sample threshold to eliminate small-sample warm-up bias).
 • Survival_Days       : Exposure duration required to reach T80 structural collapse (inf indicates nominal survival).
-        """ + "=" * 105 + "\n")
+""")
+
+        # ---------------------------------------------------------------------
+        # DATA EXPORT 1: Enriched Parquet Dataset (KEEPING ALL ORIGINAL ROWS)
+        # ---------------------------------------------------------------------
+        logger.info("Enriching the original dataset with anomaly metrics without dropping rows...")
+        
+        # Merge 1: Inject dynamic twin predictions mapped by cell and timestamp
+        df_enriched_full = df_final.merge(
+            df_twin_results[['cell_name', 'Timestamp', 'Twin_pFF_Pred', 'Underperformance', 'Digital_Twin_Alert']],
+            on=['cell_name', 'Timestamp'],
+            how='left'
+        )
+
+        # Merge 2: Inject static cell-level diagnostics
+        df_enriched_full = df_enriched_full.merge(
+            summary_table[['Extrinsic_Failure', 'Threshold_15pct_Day', 'Survival_Days']],
+            left_on='cell_name',
+            right_index=True,
+            how='left'
+        )
+        
+        # Ensure boolean defaults for non-daylight rows that Twin didn't evaluate
+        df_enriched_full['Digital_Twin_Alert'] = df_enriched_full['Digital_Twin_Alert'].fillna(False)
+
+        enriched_parquet_path = DATA_DIR / "anomaly_scored_dataset.parquet"
+        df_enriched_full.to_parquet(enriched_parquet_path, engine='pyarrow', compression='snappy')
+        logger.info(f"Exported full anomaly-scored dataset ({len(df_enriched_full)} rows) to: {enriched_parquet_path.name}")
 
         # 4. Anomaly visualization and XAI diagnostic profiling via viz_anomaly.py
         defective_cells = summary_table[summary_table['Extrinsic_Failure']].index.tolist()
         logger.info(f"Generating anomaly profiles and root-cause diagnostics for defective devices: {defective_cells}")
         logger.info(f"Saving figures to: {FIGURES_DIR}")
+
+        xai_diagnostics_dict = {}
 
         for cell_id in defective_cells:
             t_day = summary_table.loc[cell_id, 'Threshold_15pct_Day']
@@ -317,11 +347,27 @@ if __name__ == "__main__":
             plot_censored_digital_twin(df_twin_results, cell_id, alert_threshold, t_day, FIGURES_DIR)
             
             # Step 2: Fit surrogate decision tree and extract explicit rule hierarchy
-            tree_model, feat_names = extract_surrogate_rules(df_twin_results, cell_id, t_day)
+            tree_model, feat_names, tree_rules = extract_surrogate_rules(df_twin_results, cell_id, t_day)
             
             # Step 3: Render and export surrogate tree diagnostics and feature attributions
             if tree_model is not None:
                 plot_surrogate_diagnostics(tree_model, feat_names, cell_id, t_day, FIGURES_DIR)
+                
+                # Store XAI information for JSON export
+                xai_diagnostics_dict[cell_id] = {
+                    "Threshold_15pct_Day": float(t_day) if pd.notna(t_day) else None,
+                    "Features_Used": feat_names,
+                    "Extracted_Rules": tree_rules.strip().split('\n')
+                }
+
+        # ---------------------------------------------------------------------
+        # DATA EXPORT 2: XAI Surrogate Rules JSON
+        # ---------------------------------------------------------------------
+        if xai_diagnostics_dict:
+            xai_json_path = DATA_DIR / "xai_surrogate_rules.json"
+            with open(xai_json_path, 'w', encoding='utf-8') as f:
+                json.dump(xai_diagnostics_dict, f, indent=4)
+            logger.info(f"Exported XAI surrogate rules to: {xai_json_path.name}")
 
         validated_cells = summary_table[~summary_table['Extrinsic_Failure']].index.tolist()
         logger.info(f"Final validated cohort secured for long-term prognostic modeling: {validated_cells}")

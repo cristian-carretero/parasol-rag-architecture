@@ -2,7 +2,7 @@
 numpy
 pandas
 scipy
-pyarrow       
+pyarrow        
 
 # Machine Learning & Clustering
 scikit-learn
@@ -16,3 +16,6 @@ plotly
 
 # Model Serialization & MLOps
 joblib
+
+# Dashboard App
+streamlit

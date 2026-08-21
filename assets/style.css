@@ -1,0 +1,195 @@
+/* =========================================
+   1. CONTENEDOR PRINCIPAL
+========================================= */
+.block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 2rem !important;
+    max-width: 1400px !important;
+}
+[data-testid="stHeader"] {
+    background-color: transparent !important;
+    height: 3rem !important;
+}
+footer {
+    visibility: hidden;
+}
+
+/* =========================================
+   2. SIDEBAR Y ALINEACIÓN DE LOGO
+========================================= */
+[data-testid="stSidebar"] {
+    background-color: #F8F9FA !important;
+    border-right: 1px solid #EAECEF !important;
+}
+[data-testid="stSidebarHeader"] {
+    padding-top: 1rem !important;
+    padding-bottom: 0rem !important;
+    position: relative !important;
+    z-index: 99999 !important;
+}
+/* AQUÍ CORREGIMOS EL ESPACIO IZQUIERDO: Le damos "aire" a los menús */
+[data-testid="stSidebarUserContent"] {
+    padding-top: 0rem !important;
+    padding-left: 2rem !important;  /* Empuja el texto hacia la derecha */
+    padding-right: 1rem !important;
+}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    gap: 0.8rem !important;
+}
+/* Ocultar scrollbar solo en el menú lateral */
+[data-testid="stSidebarContent"]::-webkit-scrollbar,
+[data-testid="stSidebarUserContent"]::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+}
+[data-testid="stSidebarContent"],
+[data-testid="stSidebarUserContent"] {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+}
+
+/* =========================================
+   3. TARJETAS DE MÉTRICAS (KPIs)
+========================================= */
+[data-testid="metric-container"] {
+    background-color: #FFFFFF !important;
+    border: 1px solid #EAECEF !important;
+    padding: 1.25rem 1.5rem !important;
+    border-radius: 12px !important; 
+    border-left: 5px solid #36B9CC !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
+    transition: all 0.3s ease !important;
+}
+
+[data-testid="metric-container"]:hover {
+    transform: translateY(-4px) !important;
+    box-shadow: 0 12px 20px rgba(0, 0, 0, 0.08) !important;
+    border-color: #D0D7DE !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #64748B !important; 
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    font-size: 0.75rem !important; /* Etiqueta un poco más compacta */
+    letter-spacing: 0.05em !important;
+    margin-bottom: 0.2rem !important;
+}
+
+/* Reducimos el tamaño del valor para que siempre quepa en la tarjeta */
+[data-testid="stMetricValue"] {
+    color: #0F172A !important; 
+    font-weight: 700 !important;
+    font-size: 1.6rem !important; /* <-- TRUCO: Tamaño reducido (por defecto es muy grande) */
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+/* Reducimos también la flechita de variación (Delta) */
+[data-testid="stMetricDelta"] {
+    font-size: 0.85rem !important;
+}
+
+/* =========================================
+   4. PESTAÑAS (Tabs)
+========================================= */
+[data-testid="stTabs"] button {
+    font-weight: 600 !important;
+    color: #64748B !important;
+}
+[data-testid="stTabs"] button[aria-selected="true"] {
+    color: #0F172A !important;
+}
+
+/* =========================================
+   5. ALINEACIÓN DE LOS RADIO BUTTONS
+========================================= */
+/* Empuja los botones del panel principal (1D, 7D, 30D) a la derecha */
+[data-testid="stMain"] [data-testid="stRadio"] div[role="radiogroup"] {
+    justify-content: flex-end !important;
+    gap: 1.5rem !important; /* Separa un poco más los botones entre sí */
+}
+/* Mantiene ordenados los botones de la barra lateral (Navegación del Sistema) */
+[data-testid="stSidebar"] div[role="radiogroup"] {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    justify-content: flex-start !important;
+    gap: 0.5rem !important;
+    margin-top: 0 !important;
+}
+
+/* =========================================
+   6. CAJAS DE FECHA COMPACTAS Y PROFESIONALES
+========================================= */
+[data-testid="stDateInput"] {
+    max-width: 140px !important;
+}
+[data-testid="stDateInput"] input {
+    font-size: 0.8rem !important;
+    padding: 0.2rem 0.4rem !important;
+    height: 32px !important;
+}
+[data-testid="stDateInput"] label {
+    font-size: 0.7rem !important;
+    font-weight: 600 !important;
+    color: #64748B !important;
+    text-transform: uppercase !important;
+    margin-bottom: 0px !important;
+}
+
+/* =========================================
+   6b. UNIFICAR Y ALINEAR CAJAS "DESDE / HASTA"
+   (Solo afecta al contenedor con key="rango_fechas_box",
+   así no se filtra hacia el resto del layout / cabecera)
+========================================= */
+.st-key-rango_fechas_box {
+    display: flex !important;
+    justify-content: flex-end !important;
+}
+
+.st-key-rango_fechas_box [data-testid="stHorizontalBlock"] {
+    justify-content: flex-end !important;
+    align-items: center !important;
+    gap: 0 !important;
+    background-color: #F1F3F5 !important;
+    border-radius: 8px !important;
+    padding: 0.3rem 0.75rem !important;
+    width: fit-content !important;
+}
+
+.st-key-rango_fechas_box [data-testid="column"] {
+    width: fit-content !important;
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+}
+
+.st-key-rango_fechas_box [data-testid="column"]:first-child {
+    position: relative !important;
+    margin-right: 1.3rem !important;
+}
+
+.st-key-rango_fechas_box [data-testid="column"]:first-child::after {
+    content: "-";
+    position: absolute;
+    top: 50%;
+    right: -1.05rem;
+    transform: translateY(-50%);
+    color: #64748B;
+    font-weight: 600;
+    font-size: 0.9rem;
+    line-height: 1;
+    pointer-events: none;
+}
+
+.st-key-rango_fechas_box [data-testid="stDateInput"] {
+    max-width: 120px !important;
+}
+
+.st-key-rango_fechas_box [data-testid="stDateInput"] input {
+    background-color: transparent !important;
+    border: none !important;
+    padding: 0.2rem 0 !important;
+    text-align: center !important;
+}
