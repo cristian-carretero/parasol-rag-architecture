@@ -2,10 +2,12 @@
 Module: src/data_processing.py
 Description: Ingestion, cleaning, and mass conversion of raw data (CSV) 
 into optimized columnar Parquet format for all outdoor cells.
+Incorporates early-stage Magnus-Tetens approximation for Absolute Humidity.
 """
 
 from pathlib import Path
 import pandas as pd
+import numpy as np
 import logging
 
 # Logging configuration for professional traceability (MLOps standard)
@@ -64,7 +66,7 @@ def process_device_data(device_id: str) -> None:
     else:
         logger.warning(f"J-V file not found at: {jv_file}")
 
-    # 3. Process Meteorological Data
+    # 3. Process Meteorological Data & Calculate Absolute Humidity
     meteo_file = device_raw_dir / f"{device_id}_meteo.csv"
     output_path_meteo = device_processed_dir / f"{device_id}_meteo.parquet"
     
@@ -73,6 +75,19 @@ def process_device_data(device_id: str) -> None:
         df_meteo['Timestamp'] = pd.to_datetime(df_meteo['Timestamp'], errors='coerce')
         df_meteo = df_meteo.dropna(subset=['Timestamp', 'POA_Irradiance_W_m2', 'ModuleTemp_C'])
         
+        # --- Magnus-Tetens Absolute Humidity ---
+        if 'AmbientTemp_C' in df_meteo.columns and 'RelativeHumidity_pct' in df_meteo.columns:
+            T_amb = df_meteo['AmbientTemp_C']
+            rh_pct = df_meteo['RelativeHumidity_pct']
+            
+            # 1. Saturation Vapor Pressure (p_sat) in hPa (mbar)
+            p_sat = 6.112 * np.exp((17.67 * T_amb) / (T_amb + 243.5))
+            # 2. Actual Vapor Pressure (p_a) in hPa
+            p_a = p_sat * (rh_pct / 100.0)
+            # 3. Absolute Humidity (AH) in g/m^3
+            df_meteo['AbsoluteHumidity_g_m3'] = (216.68 * p_a) / (T_amb + 273.15)
+            logger.info(f" -> Computed Absolute Humidity (Magnus-Tetens) for {device_id}")
+
         output_path_meteo.parent.mkdir(parents=True, exist_ok=True)
         df_meteo.to_parquet(output_path_meteo, engine='pyarrow', compression='snappy', index=False)
         logger.info(f" -> Meteorological file successfully saved to: {output_path_meteo} ({len(df_meteo):,} records)")

@@ -3,7 +3,6 @@ Module: src/survival_dataset.py
 Description: Feature engineering for Survival Analysis. 
 Groups J-V scans at the curve level and aligns them with instantaneous 
 environmental stress metrics, maintaining strict temporal causality.
-Incorporates Magnus-Tetens approximation for Absolute Humidity.
 Cumulative doses have been removed to avoid age-bias in downstream ML models.
 """
 
@@ -64,20 +63,7 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
         df_meteo['delta_t_h'] = df_meteo['Timestamp'].diff().dt.total_seconds().fillna(0) / 3600.0
         df_meteo['exposure_time_h'] = df_meteo['delta_t_h'].cumsum()
         
-        # --- B. ABSOLUTE HUMIDITY CALCULATION (Magnus-Tetens) ---
-        T_amb = df_meteo['AmbientTemp_C']
-        rh_pct = df_meteo['RelativeHumidity_pct']
-        
-        # 1. Saturation Vapor Pressure (p_sat) in hPa (mbar)
-        p_sat = 6.112 * np.exp((17.67 * T_amb) / (T_amb + 243.5))
-        
-        # 2. Actual Vapor Pressure (p_a) in hPa
-        p_a = p_sat * (rh_pct / 100.0)
-        
-        # 3. Absolute Humidity (AH) in g/m^3
-        df_meteo['AbsoluteHumidity_g_m3'] = (216.68 * p_a) / (T_amb + 273.15)
-        
-        # Select instantaneous stress metrics and the join key
+        # Select instantaneous stress metrics and the join key (Absolute Humidity is already included)
         cols_meteo = [
             'Timestamp', 
             'exposure_time_h', 

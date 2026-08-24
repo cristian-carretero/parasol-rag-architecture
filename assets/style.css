@@ -1,10 +1,53 @@
+:root {
+    --ps-primary:   #36B9CC;
+    --ps-dark:      #1E293B;
+    --ps-accent:    #F59E0B;
+    --ps-blue:      #3B82F6;
+    --ps-bg-soft:   #F8FAFC;
+    --ps-border:    #E2E8F0;
+}
+
+/* Tipografía y fondo general */
+.stApp { background-color: #FFFFFF; }
+h1, h2, h3, h4, h5 { letter-spacing: -0.02em; color: var(--ps-dark); }
+
+/* Tarjetas de contenido (contenedores con borde) */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 14px !important;
+    border: 1px solid var(--ps-border) !important;
+    background: var(--ps-bg-soft);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+/* Métricas (KPIs) */
+div[data-testid="stMetric"] {
+    background: #FFFFFF;
+    border: 1px solid var(--ps-border);
+    border-radius: 12px;
+    padding: 0.9rem 1rem 0.7rem 1rem;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+div[data-testid="stMetricLabel"] { font-weight: 600; color: #475569; }
+
+/* Pestañas */
+button[data-baseweb="tab"] { font-weight: 600; }
+
+/* Control segmentado (ventana temporal) */
+div[data-testid="stSegmentedControl"] label {
+    font-weight: 600;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] { border-right: 1px solid var(--ps-border); }
+hr { margin: 1.1rem 0; border-color: var(--ps-border); }
+
 /* =========================================
    1. CONTENEDOR PRINCIPAL
 ========================================= */
 .block-container {
     padding-top: 2rem !important;
     padding-bottom: 2rem !important;
-    max-width: 1400px !important;
+    max-width: 1100px !important;
 }
 [data-testid="stHeader"] {
     background-color: transparent !important;
@@ -27,16 +70,14 @@ footer {
     position: relative !important;
     z-index: 99999 !important;
 }
-/* AQUÍ CORREGIMOS EL ESPACIO IZQUIERDO: Le damos "aire" a los menús */
 [data-testid="stSidebarUserContent"] {
     padding-top: 0rem !important;
-    padding-left: 2rem !important;  /* Empuja el texto hacia la derecha */
+    padding-left: 2rem !important; 
     padding-right: 1rem !important;
 }
 [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
     gap: 0.8rem !important;
 }
-/* Ocultar scrollbar solo en el menú lateral */
 [data-testid="stSidebarContent"]::-webkit-scrollbar,
 [data-testid="stSidebarUserContent"]::-webkit-scrollbar {
     display: none !important;
@@ -49,7 +90,7 @@ footer {
 }
 
 /* =========================================
-   3. TARJETAS DE MÉTRICAS (KPIs)
+   3. TARJETAS DE MÉTRICAS (KPIs) AVANZADAS
 ========================================= */
 [data-testid="metric-container"] {
     background-color: #FFFFFF !important;
@@ -60,33 +101,27 @@ footer {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
     transition: all 0.3s ease !important;
 }
-
 [data-testid="metric-container"]:hover {
     transform: translateY(-4px) !important;
     box-shadow: 0 12px 20px rgba(0, 0, 0, 0.08) !important;
     border-color: #D0D7DE !important;
 }
-
 [data-testid="stMetricLabel"] {
     color: #64748B !important; 
     font-weight: 600 !important;
     text-transform: uppercase !important;
-    font-size: 0.75rem !important; /* Etiqueta un poco más compacta */
+    font-size: 0.75rem !important;
     letter-spacing: 0.05em !important;
     margin-bottom: 0.2rem !important;
 }
-
-/* Reducimos el tamaño del valor para que siempre quepa en la tarjeta */
 [data-testid="stMetricValue"] {
     color: #0F172A !important; 
     font-weight: 700 !important;
-    font-size: 1.6rem !important; /* <-- TRUCO: Tamaño reducido (por defecto es muy grande) */
+    font-size: 1.6rem !important; 
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
 }
-
-/* Reducimos también la flechita de variación (Delta) */
 [data-testid="stMetricDelta"] {
     font-size: 0.85rem !important;
 }
@@ -105,12 +140,10 @@ footer {
 /* =========================================
    5. ALINEACIÓN DE LOS RADIO BUTTONS
 ========================================= */
-/* Empuja los botones del panel principal (1D, 7D, 30D) a la derecha */
 [data-testid="stMain"] [data-testid="stRadio"] div[role="radiogroup"] {
     justify-content: flex-end !important;
-    gap: 1.5rem !important; /* Separa un poco más los botones entre sí */
+    gap: 1.5rem !important; 
 }
-/* Mantiene ordenados los botones de la barra lateral (Navegación del Sistema) */
 [data-testid="stSidebar"] div[role="radiogroup"] {
     display: flex !important;
     flex-direction: column !important;
@@ -121,11 +154,9 @@ footer {
 }
 
 /* =========================================
-   6. CAJAS DE FECHA COMPACTAS Y PROFESIONALES
+   6. CAJAS DE FECHA Y SIDEBAR FIXES
 ========================================= */
-[data-testid="stDateInput"] {
-    max-width: 140px !important;
-}
+[data-testid="stDateInput"] { max-width: 140px !important; }
 [data-testid="stDateInput"] input {
     font-size: 0.8rem !important;
     padding: 0.2rem 0.4rem !important;
@@ -139,57 +170,15 @@ footer {
     margin-bottom: 0px !important;
 }
 
-/* =========================================
-   6b. UNIFICAR Y ALINEAR CAJAS "DESDE / HASTA"
-   (Solo afecta al contenedor con key="rango_fechas_box",
-   así no se filtra hacia el resto del layout / cabecera)
-========================================= */
-.st-key-rango_fechas_box {
-    display: flex !important;
-    justify-content: flex-end !important;
+[data-testid="stSidebarContent"] {
+    padding-top: 2rem !important;
 }
-
-.st-key-rango_fechas_box [data-testid="stHorizontalBlock"] {
-    justify-content: flex-end !important;
-    align-items: center !important;
-    gap: 0 !important;
-    background-color: #F1F3F5 !important;
-    border-radius: 8px !important;
-    padding: 0.3rem 0.75rem !important;
-    width: fit-content !important;
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+    font-size: 0.9rem !important;
+    font-weight: 600 !important;
+    color: #475569;
 }
-
-.st-key-rango_fechas_box [data-testid="column"] {
-    width: fit-content !important;
-    flex: 0 0 auto !important;
-    min-width: 0 !important;
-}
-
-.st-key-rango_fechas_box [data-testid="column"]:first-child {
-    position: relative !important;
-    margin-right: 1.3rem !important;
-}
-
-.st-key-rango_fechas_box [data-testid="column"]:first-child::after {
-    content: "-";
-    position: absolute;
-    top: 50%;
-    right: -1.05rem;
-    transform: translateY(-50%);
-    color: #64748B;
-    font-weight: 600;
-    font-size: 0.9rem;
-    line-height: 1;
-    pointer-events: none;
-}
-
-.st-key-rango_fechas_box [data-testid="stDateInput"] {
-    max-width: 120px !important;
-}
-
-.st-key-rango_fechas_box [data-testid="stDateInput"] input {
-    background-color: transparent !important;
-    border: none !important;
-    padding: 0.2rem 0 !important;
-    text-align: center !important;
+[data-testid="stSidebar"] .stRadio > div {
+    gap: 0.3rem !important;
+    margin-bottom: -0.5rem;
 }
