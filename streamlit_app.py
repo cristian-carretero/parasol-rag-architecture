@@ -34,13 +34,14 @@ def cargar_estilos() -> None:
         st.warning("⚠️ No se ha encontrado el archivo 'assets/style.css'. Asegúrate de que existe.")
 
 # =====================================================================
-# CARGA Y CACHÉ DE DATOS METEOROLÓGICOS
+# CARGA Y CACHÉ DEL DATASET UNIFICADO (METEO + MPP)
 # =====================================================================
 @st.cache_data(show_spinner=False)
-def cargar_datos_meteo() -> pd.DataFrame:
+def cargar_datos_globales() -> pd.DataFrame:
+    # Ruta actualizada al dataset unificado que incluye las columnas de potencia y PCE
     ruta_archivo = (
         r"C:\Users\crica\OneDrive - UNIVERSIDAD DE SEVILLA\Escritorio"
-        r"\parasol-rag-architecture-main\data\aggregated\outdoor\meteo_10min.parquet"
+        r"\parasol-rag-architecture-main\data\aggregated\outdoor\fleet_merged_10min.parquet"
     )
     try:
         df = pd.read_parquet(ruta_archivo)
@@ -50,7 +51,22 @@ def cargar_datos_meteo() -> pd.DataFrame:
         df.set_index("Timestamp", inplace=True)
         return df
     except Exception as e:
-        st.error(f"Error al cargar los datos meteorológicos agregados: {e}")
+        st.error(f"Error al cargar el dataset de la flota (fleet_merged_10min): {e}")
+        return pd.DataFrame()
+
+@st.cache_data(show_spinner=False)
+def cargar_datos_supervivencia() -> pd.DataFrame:
+    ruta_archivo = (
+        r"C:\Users\crica\OneDrive - UNIVERSIDAD DE SEVILLA\Escritorio"
+        r"\parasol-rag-architecture-main\data\processed\outdoor\survival_dataset.parquet"
+    )
+    try:
+        df = pd.read_parquet(ruta_archivo)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+        df.set_index("Timestamp", inplace=True)
+        return df
+    except Exception as e:
+        st.error(f"Error al cargar el dataset de supervivencia: {e}")
         return pd.DataFrame()
 
 # =====================================================================
@@ -59,6 +75,9 @@ def cargar_datos_meteo() -> pd.DataFrame:
 def crear_grafico_plotly(
     df, y_cols, color_seq=None, metrica_central="Media", band_min_col=None, band_max_col=None
 ):
+    if df.empty:
+        return go.Figure()
+
     fig = go.Figure()
     if isinstance(y_cols, str):
         y_cols = [y_cols]
@@ -75,64 +94,422 @@ def crear_grafico_plotly(
 
     has_bands = band_min_col and band_max_col and band_min_col in df.columns and band_max_col in df.columns
 
-    df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
-    df_1d_min = df.resample("1D").min(numeric_only=True)
-    df_1d_max = df.resample("1D").max(numeric_only=True)
-    df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
-    df_7d_min = df.resample("7D").min(numeric_only=True)
-    df_7d_max = df.resample("7D").max(numeric_only=True)
-    df_30d_main = df.resample("30D").agg(agg_func, numeric_only=True)
-    df_30d_min = df.resample("30D").min(numeric_only=True)
-    df_30d_max = df.resample("30D").max(numeric_only=True)
+    min_dt = df.index.min()
+    max_dt = df.index.max()
+    duracion_dias = (max_dt - min_dt).total_seconds() / 86400.0
 
-    for i, col in enumerate(y_cols):
-        c = color_seq[i % len(color_seq)]
-        c_fill = hex_to_rgba(c, 0.25)
-        name = str(col)
+    if duracion_dias <= 1.0:
+        # Caso 1: Rango <= 1 día -> Solo nativo (1 trazo por métrica, sin bandas)
+        for i, col in enumerate(y_cols):
+            c = color_seq[i % len(color_seq)]
+            name = str(col)
+            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers", name=name, line=dict(color=c, width=1.5), marker=dict(size=4), visible=True, connectgaps=True))
 
-        use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
-        b_min = band_min_col if use_band else col
-        b_max = band_max_col if use_band else col
+        updatemenus_config = []
 
-        fig.add_trace(go.Scatter(x=df.index, y=df[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=True, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df.index, y=df[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=True, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines", name=name, line=dict(color=c, width=1.5), visible=True, connectgaps=True))
+    elif duracion_dias <= 7.0:
+        # Caso 2: 1 < días <= 7 -> Nativo, Horaria (1H) y Diaria (1D)
+        df_1h_main = df.resample("1h").agg(agg_func, numeric_only=True)
+        df_1h_min = df.resample("1h").min(numeric_only=True)
+        df_1h_max = df.resample("1h").max(numeric_only=True)
+        
+        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
+        df_1d_min = df.resample("1D").min(numeric_only=True)
+        df_1d_max = df.resample("1D").max(numeric_only=True)
 
-        fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
+        for i, col in enumerate(y_cols):
+            c = color_seq[i % len(color_seq)]
+            c_fill = hex_to_rgba(c, 0.25)
+            name = str(col)
+            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
+            b_min = band_min_col if use_band else col
+            b_max = band_max_col if use_band else col
 
-        fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
+            # Nativo (1 trazo, Visible)
+            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers", name=name, line=dict(color=c, width=1.5), marker=dict(size=4), visible=True, connectgaps=True))
 
-        fig.add_trace(go.Scatter(x=df_30d_min.index, y=df_30d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_30d_max.index, y=df_30d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
-        fig.add_trace(go.Scatter(x=df_30d_main.index, y=df_30d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 30D)", line=dict(color=c, width=2.5), marker=dict(size=10), visible=False, connectgaps=True))
+            # Horaria 1H (3 trazos, Oculto)
+            fig.add_trace(go.Scatter(x=df_1h_min.index, y=df_1h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1h_max.index, y=df_1h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1h_main.index, y=df_1h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1H)", line=dict(color=c, width=2.0), marker=dict(size=5), visible=False, connectgaps=True))
 
-    n = len(y_cols)
-    vis_orig = ([True, True, True, False, False, False, False, False, False, False, False, False]) * n
-    vis_1d = ([False, False, False, True, True, True, False, False, False, False, False, False]) * n
-    vis_7d = ([False, False, False, False, False, False, True, True, True, False, False, False]) * n
-    vis_30d = ([False, False, False, False, False, False, False, False, False, True, True, True]) * n
+            # Diaria 1D (3 trazos, Oculto)
+            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
 
-    botones_agregados = [
-        dict(label="Nativo (10 min)", method="update", args=[{"visible": vis_orig}]),
-        dict(label=f"{label_stat} Diaria (1D)", method="update", args=[{"visible": vis_1d}]),
-        dict(label=f"{label_stat} Semanal (7D)", method="update", args=[{"visible": vis_7d}]),
-        dict(label=f"{label_stat} Mensual (30D)", method="update", args=[{"visible": vis_30d}]),
-    ]
+        n = len(y_cols)
+        vis_orig = ([True, False, False, False, False, False, False]) * n
+        vis_1h   = ([False, True, True, True, False, False, False]) * n
+        vis_1d   = ([False, False, False, False, True, True, True]) * n
+
+        botones_agregados = [
+            dict(label="Nativo (10 min)", method="update", args=[{"visible": vis_orig}]),
+            dict(label=f"{label_stat} Horaria (1H)", method="update", args=[{"visible": vis_1h}]),
+            dict(label=f"{label_stat} Diaria (1D)", method="update", args=[{"visible": vis_1d}]),
+        ]
+
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
+
+    elif duracion_dias <= 30.0:
+        # Caso 3: 7 < días <= 30 -> Horaria (1H) [Arranca aquí], Diaria (1D) y Semanal (7D)
+        df_1h_main = df.resample("1h").agg(agg_func, numeric_only=True)
+        df_1h_min = df.resample("1h").min(numeric_only=True)
+        df_1h_max = df.resample("1h").max(numeric_only=True)
+        
+        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
+        df_1d_min = df.resample("1D").min(numeric_only=True)
+        df_1d_max = df.resample("1D").max(numeric_only=True)
+        
+        df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
+        df_7d_min = df.resample("7D").min(numeric_only=True)
+        df_7d_max = df.resample("7D").max(numeric_only=True)
+
+        for i, col in enumerate(y_cols):
+            c = color_seq[i % len(color_seq)]
+            c_fill = hex_to_rgba(c, 0.25)
+            name = str(col)
+            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
+            b_min = band_min_col if use_band else col
+            b_max = band_max_col if use_band else col
+
+            # Horaria 1H (3 trazos, Visible por defecto)
+            fig.add_trace(go.Scatter(x=df_1h_min.index, y=df_1h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=True, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1h_max.index, y=df_1h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=True, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1h_main.index, y=df_1h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1H)", line=dict(color=c, width=2.0), marker=dict(size=5), visible=True, connectgaps=True))
+
+            # Diaria 1D (3 trazos, Oculto)
+            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
+
+            # Semanal 7D (3 trazos, Oculto)
+            fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
+
+        n = len(y_cols)
+        vis_1h = ([True, True, True, False, False, False, False, False, False]) * n
+        vis_1d = ([False, False, False, True, True, True, False, False, False]) * n
+        vis_7d = ([False, False, False, False, False, False, True, True, True]) * n
+
+        botones_agregados = [
+            dict(label=f"{label_stat} Horaria (1H)", method="update", args=[{"visible": vis_1h}]),
+            dict(label=f"{label_stat} Diaria (1D)", method="update", args=[{"visible": vis_1d}]),
+            dict(label=f"{label_stat} Semanal (7D)", method="update", args=[{"visible": vis_7d}]),
+        ]
+
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
+
+    else:
+        # Caso 4 (Histórico): Diaria (1D), Semanal (7D) y Mensual (30D)
+        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
+        df_1d_min = df.resample("1D").min(numeric_only=True)
+        df_1d_max = df.resample("1D").max(numeric_only=True)
+        
+        df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
+        df_7d_min = df.resample("7D").min(numeric_only=True)
+        df_7d_max = df.resample("7D").max(numeric_only=True)
+        
+        df_30d_main = df.resample("30D").agg(agg_func, numeric_only=True)
+        df_30d_min = df.resample("30D").min(numeric_only=True)
+        df_30d_max = df.resample("30D").max(numeric_only=True)
+
+        for i, col in enumerate(y_cols):
+            c = color_seq[i % len(color_seq)]
+            c_fill = hex_to_rgba(c, 0.25)
+            name = str(col)
+            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
+            b_min = band_min_col if use_band else col
+            b_max = band_max_col if use_band else col
+
+            # Diaria
+            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=True, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=True, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", line=dict(color=c, width=2.5), marker=dict(size=6), visible=True, connectgaps=True))
+
+            # Semanal
+            fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
+
+            # Mensual
+            fig.add_trace(go.Scatter(x=df_30d_min.index, y=df_30d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_30d_max.index, y=df_30d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_30d_main.index, y=df_30d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 30D)", line=dict(color=c, width=2.5), marker=dict(size=10), visible=False, connectgaps=True))
+
+        n = len(y_cols)
+        vis_1d = ([True, True, True, False, False, False, False, False, False]) * n
+        vis_7d = ([False, False, False, True, True, True, False, False, False]) * n
+        vis_30d = ([False, False, False, False, False, False, True, True, True]) * n
+
+        botones_agregados = [
+            dict(label=f"{label_stat} Diaria (1D)", method="update", args=[{"visible": vis_1d}]),
+            dict(label=f"{label_stat} Semanal (7D)", method="update", args=[{"visible": vis_7d}]),
+            dict(label=f"{label_stat} Mensual (30D)", method="update", args=[{"visible": vis_30d}]),
+        ]
+
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
 
     fig.update_layout(
-        margin=dict(l=10, r=10, t=10, b=60),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        updatemenus=[dict(type="buttons", direction="right", buttons=botones_agregados, showactive=True, x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"), bgcolor="#F8FAFC", bordercolor="#E2E8F0")],
+        margin=dict(l=10, r=10, t=10, b=60), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        updatemenus=updatemenus_config,
     )
+    
     fig.update_xaxes(showgrid=True, gridcolor="#F1F5F9")
-    fig.update_yaxes(showgrid=True, gridcolor="#F1F5F9")
+    
+    return fig
+
+
+# =====================================================================
+# GRÁFICO PLOTLY DE BARRAS ACUMULADAS (DOSIS DE FATIGA)
+# =====================================================================
+def crear_grafico_barras_acumuladas(df, col, color, ylabel, factor_conversion):
+    if df.empty or col not in df.columns:
+        return go.Figure()
+    
+    df_calc = df[[col]].copy()
+    df_calc['Dose'] = df_calc[col] * factor_conversion
+    
+    min_dt = df_calc.index.min()
+    max_dt = df_calc.index.max()
+    duracion_dias = (max_dt - min_dt).total_seconds() / 86400.0
+
+    def generar_etiquetas_y_widths(indices, dias):
+        etiquetas, widths = [], []
+        for fecha in indices:
+            if dias < 1:  
+                fin_teorico = fecha + pd.Timedelta(hours=1)
+                fecha_fin = min(fin_teorico, max_dt)
+                etiquetas.append(f"{fecha.strftime('%d/%m/%Y %H:%M')} - {fecha_fin.strftime('%H:%M')}")
+                widths.append(3600000 * 0.95)  
+            else:
+                fin_teorico = fecha + pd.Timedelta(days=dias - 1)
+                fecha_fin = min(fin_teorico, max_dt)
+                dias_reales = (fecha_fin.date() - fecha.date()).days + 1
+                
+                if dias_reales <= 1:
+                    etiquetas.append(fecha.strftime('%d/%m/%Y'))
+                else:
+                    etiquetas.append(f"{fecha.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}")
+                widths.append((dias_reales * 86400000) * 0.95)
+        return etiquetas, widths
+
+    fig = go.Figure()
+
+    def add_bar_trace(x_data, y_data, dias, name_suffix, is_visible):
+        if len(x_data) == 0: return
+        custom_texts, widths = generar_etiquetas_y_widths(x_data, dias)
+        fig.add_trace(go.Bar(
+            x=x_data, y=y_data, customdata=custom_texts, name=f"Dosis {name_suffix}",
+            marker_color=color, marker_line_color='white', marker_line_width=1.5,
+            opacity=0.9, width=widths, offset=0, 
+            hovertemplate="<b>%{customdata}</b><br>Dosis Acumulada: %{y:.2f} " + ylabel + "<extra></extra>",
+            visible=is_visible
+        ))
+
+    # Pre-cálculos para asegurar que siempre haya trazados generados
+    df_1h = df_calc.resample("1h")['Dose'].sum().dropna()
+    df_1d = df_calc.resample("1D")['Dose'].sum().dropna()
+    df_7d = df_calc.resample("7D")['Dose'].sum().dropna()
+    df_30d = df_calc.resample("30D")['Dose'].sum().dropna()
+
+    botones_agregados = []
+
+    # Blindamos la interfaz gráfica: Siempre habrá botones visibles, 
+    # y si estamos en 1D, incluimos el conteo por horas.
+    if duracion_dias <= 1.0:
+        add_bar_trace(df_1h.index, df_1h.values, 1/24, "Horaria (1H)", True)
+        botones_agregados = [dict(label="Horaria (1H)", method="update", args=[{"visible": [True]}])]
+    elif duracion_dias <= 7.0:
+        add_bar_trace(df_1h.index, df_1h.values, 1/24, "Horaria (1H)", True)
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", False)
+        botones_agregados = [
+            dict(label="Horaria (1H)", method="update", args=[{"visible": [True, False]}]),
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [False, True]}]),
+        ]
+    elif duracion_dias <= 30.0:
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", True)
+        add_bar_trace(df_7d.index, df_7d.values, 7, "Semanal (7D)", False)
+        botones_agregados = [
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [True, False]}]),
+            dict(label="Semanal (7D)", method="update", args=[{"visible": [False, True]}]),
+        ]
+    else:
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", True)
+        add_bar_trace(df_7d.index, df_7d.values, 7, "Semanal (7D)", False)
+        add_bar_trace(df_30d.index, df_30d.values, 30, "Mensual (30D)", False)
+        botones_agregados = [
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [True, False, False]}]),
+            dict(label="Semanal (7D)", method="update", args=[{"visible": [False, True, False]}]),
+            dict(label="Mensual (30D)", method="update", args=[{"visible": [False, False, True]}]),
+        ]
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=60), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        hovermode="closest", bargap=0.0, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        updatemenus=[
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ],
+    )
+    
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#F1F5F9", title_text=ylabel)
+    return fig
+
+# =====================================================================
+# GRÁFICO PLOTLY DE BARRAS ACUMULADAS (DOSIS DE FATIGA)
+# =====================================================================
+def crear_grafico_barras_acumuladas(df, col, color, ylabel, factor_conversion):
+    if df.empty or col not in df.columns:
+        return go.Figure()
+    
+    # 1. Preparación de datos base
+    df_calc = df[[col]].copy()
+    df_calc['Dose'] = df_calc[col] * factor_conversion
+    
+    min_dt = df_calc.index.min()
+    max_dt = df_calc.index.max()
+    duracion_dias = (max_dt - min_dt).total_seconds() / 86400.0
+
+    def generar_etiquetas_y_widths(indices, dias):
+        etiquetas = []
+        widths = []
+        for fecha in indices:
+            if dias < 1:  
+                fin_teorico = fecha + pd.Timedelta(hours=1)
+                fecha_fin = min(fin_teorico, max_dt)
+                etiquetas.append(f"{fecha.strftime('%d/%m/%Y %H:%M')} - {fecha_fin.strftime('%H:%M')}")
+                widths.append(3600000 * 0.95)  
+            else:
+                fin_teorico = fecha + pd.Timedelta(days=dias - 1)
+                fecha_fin = min(fin_teorico, max_dt)
+                dias_reales = (fecha_fin.date() - fecha.date()).days + 1
+                
+                if dias_reales <= 1:
+                    etiquetas.append(fecha.strftime('%d/%m/%Y'))
+                else:
+                    etiquetas.append(f"{fecha.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}")
+                
+                widths.append((dias_reales * 86400000) * 0.95)
+                
+        return etiquetas, widths
+
+    fig = go.Figure()
+
+    def add_bar_trace(x_data, y_data, dias, name_suffix, is_visible):
+        custom_texts, widths = generar_etiquetas_y_widths(x_data, dias)
+        fig.add_trace(go.Bar(
+            x=x_data, 
+            y=y_data, 
+            customdata=custom_texts,
+            name=f"Dosis {name_suffix}",
+            marker_color=color,
+            marker_line_color='white',
+            marker_line_width=1.5,
+            opacity=0.9,
+            width=widths, 
+            offset=0, 
+            hovertemplate="<b>%{customdata}</b><br>Dosis Acumulada: %{y:.2f} " + ylabel + "<extra></extra>",
+            visible=is_visible
+        ))
+
+    if duracion_dias <= 1.0:
+        df_1h = df_calc.resample("1h")['Dose'].sum().dropna()
+        add_bar_trace(df_1h.index, df_1h.values, 1/24, "Horaria (1H)", True)
+        updatemenus_config = []
+
+    elif duracion_dias <= 7.0:
+        df_1h = df_calc.resample("1h")['Dose'].sum().dropna()
+        df_1d = df_calc.resample("1D")['Dose'].sum().dropna()
+
+        add_bar_trace(df_1h.index, df_1h.values, 1/24, "Horaria (1H)", True)
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", False)
+
+        botones_agregados = [
+            dict(label="Horaria (1H)", method="update", args=[{"visible": [True, False]}]),
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [False, True]}]),
+        ]
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
+
+    elif duracion_dias <= 30.0:
+        df_1d = df_calc.resample("1D")['Dose'].sum().dropna()
+        df_7d = df_calc.resample("7D")['Dose'].sum().dropna()
+
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", True)
+        add_bar_trace(df_7d.index, df_7d.values, 7, "Semanal (7D)", False)
+
+        botones_agregados = [
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [True, False]}]),
+            dict(label="Semanal (7D)", method="update", args=[{"visible": [False, True]}]),
+        ]
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
+
+    else:
+        df_1d = df_calc.resample("1D")['Dose'].sum().dropna()
+        df_7d = df_calc.resample("7D")['Dose'].sum().dropna()
+        df_30d = df_calc.resample("30D")['Dose'].sum().dropna()
+
+        add_bar_trace(df_1d.index, df_1d.values, 1, "Diaria (1D)", True)
+        add_bar_trace(df_7d.index, df_7d.values, 7, "Semanal (7D)", False)
+        add_bar_trace(df_30d.index, df_30d.values, 30, "Mensual (30D)", False)
+
+        botones_agregados = [
+            dict(label="Diaria (1D)", method="update", args=[{"visible": [True, False, False]}]),
+            dict(label="Semanal (7D)", method="update", args=[{"visible": [False, True, False]}]),
+            dict(label="Mensual (30D)", method="update", args=[{"visible": [False, False, True]}]),
+        ]
+        updatemenus_config = [
+            dict(
+                type="buttons", direction="right", buttons=botones_agregados, active=0, showactive=True,
+                x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
+                bgcolor="#F8FAFC", bordercolor="#E2E8F0"
+            )
+        ]
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=60), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        hovermode="closest", bargap=0.0, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        updatemenus=updatemenus_config,
+    )
+    
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#F1F5F9", title_text=ylabel)
     return fig
 
 # =====================================================================
@@ -200,7 +577,8 @@ def vista_general():
 
     tipo_irradiancia = st.sidebar.radio("Irradiancia (KPI 1)", ["Media", "Pico"])
     tipo_temp_modulo = st.sidebar.radio("Temp. Módulo (KPI 3)", ["Media", "Mediana"])
-    tipo_kpi4 = st.sidebar.radio("Métrica Secundaria (KPI 4)", ["Dosis Térmica", "Humedad Relativa"])
+    
+    tipo_kpi4 = st.sidebar.radio("Métrica Secundaria (KPI 4)", ["Dosis Radiación", "Humedad Relativa", "Humedad Absoluta"])
 
     st.sidebar.divider() 
 
@@ -229,10 +607,11 @@ def vista_general():
         unsafe_allow_html=True,
     )
 
-    df_meteo = cargar_datos_meteo()
-    if not df_meteo.empty:
-        max_date = pd.to_datetime(df_meteo.index.max()).date()
-        min_date = pd.to_datetime(df_meteo.index.min()).date()
+    df_flota = cargar_datos_globales()
+    
+    if not df_flota.empty:
+        max_date = pd.to_datetime(df_flota.index.max()).date()
+        min_date = pd.to_datetime(df_flota.index.min()).date()
     else:
         max_date = datetime.date.today()
         min_date = max_date - datetime.timedelta(days=30)
@@ -246,17 +625,26 @@ def vista_general():
 
     df_plot, df_prev = pd.DataFrame(), pd.DataFrame()
 
-    if not df_meteo.empty:
-        max_timestamp = df_meteo.index.max()
+    if not df_flota.empty:
+        max_timestamp = df_flota.index.max()
 
         if rango_temporal in ("1D", "7D", "30D"):
             dias = {"1D": 1, "7D": 7, "30D": 30}[rango_temporal]
-            delta = pd.Timedelta(days=dias)
-            df_plot = df_meteo[df_meteo.index >= (max_timestamp - delta)]
-            df_prev = df_meteo[(df_meteo.index >= (max_timestamp - 2 * delta)) & (df_meteo.index < (max_timestamp - delta))]
+            
+            anchor_time = max_timestamp
+            if anchor_time.hour == 0 and anchor_time.minute == 0 and anchor_time.second == 0:
+                anchor_time -= pd.Timedelta(seconds=1)
+
+            delta_start = pd.Timedelta(days=dias - 1)
+            start_date = (anchor_time - delta_start).normalize()
+            
+            df_plot = df_flota[df_flota.index >= start_date]
+            
+            delta_prev = pd.Timedelta(days=dias)
+            df_prev = df_flota[(df_flota.index >= (start_date - delta_prev)) & (df_flota.index < start_date)]
         
         elif rango_temporal == "Histórico":
-            df_plot = df_meteo.copy()
+            df_plot = df_flota.copy()
             df_prev = pd.DataFrame()
             
         elif rango_temporal == "Fechas":
@@ -267,27 +655,26 @@ def vista_general():
                 start_dt = pd.to_datetime(fecha_inicio)
                 end_dt = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
                 
-                # Filtramos primero para comprobar si hay registros coincidentes
-                df_plot = df_meteo[(df_meteo.index >= start_dt) & (df_meteo.index <= end_dt)]
+                df_plot = df_flota[(df_flota.index >= start_dt) & (df_flota.index <= end_dt)]
                 
-                # Si no hay ningún registro coincidente, lanzamos error rojo y detenemos antes del warning de límites
                 if df_plot.empty:
-                    st.error(f"❌ **Sin registros:** No se han encontrado datos disponibles para el periodo seleccionado. Los datos disponibles en el sistema solo abarcan desde el "
-                        f"**{min_date.strftime('%d/%m/%Y')}** hasta el **{max_date.strftime('%d/%m/%Y')}**.")
+                    st.error(
+                        f"❌ **Sin registros:** No se han encontrado datos disponibles para el periodo seleccionado. "
+                        f"Los datos del sistema comprenden desde el **{min_date.strftime('%d/%m/%Y')}** "
+                        f"hasta el **{max_date.strftime('%d/%m/%Y')}**."
+                    )
                     st.stop()
                 
-                # Si sí hay registros pero el usuario se salió por los extremos, lanzamos la advertencia informativa
                 if fecha_inicio < min_date or fecha_fin > max_date:
                     st.warning(
-                        f"⚠️ **Rango fuera de los límites del dataset:** "
-                        f"Has seleccionado desde el **{fecha_inicio.strftime('%d/%m/%Y')}** hasta el **{fecha_fin.strftime('%d/%m/%Y')}**. "
-                        f"Sin embargo, los datos disponibles en el sistema solo abarcan desde el "
+                        f"⚠️ **Rango fuera de los límites del dataset:** Has seleccionado desde el **{fecha_inicio.strftime('%d/%m/%Y')}** "
+                        f"hasta el **{fecha_fin.strftime('%d/%m/%Y')}**, pero los datos disponibles comprenden desde el "
                         f"**{min_date.strftime('%d/%m/%Y')}** hasta el **{max_date.strftime('%d/%m/%Y')}**. "
-                        f"Se muestran únicamente los registros que coinciden dentro del periodo disponible."
+                        f"Se muestran únicamente los registros de los días con datos disponibles."
                     )
                 
                 delta_fechas = end_dt - start_dt
-                df_prev = df_meteo[(df_meteo.index >= (start_dt - delta_fechas)) & (df_meteo.index < start_dt)]
+                df_prev = df_flota[(df_flota.index >= (start_dt - delta_fechas)) & (df_flota.index < start_dt)]
 
         df_plot = df_plot.dropna(how="all")
         if df_plot.empty:
@@ -302,6 +689,7 @@ def vista_general():
             else:
                 irr_act, kpi1_label = df_plot["POA_Irradiance_W_m2"].max(), "Irradiancia POA Pico"
                 irr_prev = df_prev["POA_Irradiance_W_m2"].max() if has_prev else np.nan
+            
             kpi1_val, kpi1_delta = format_kpi(irr_act, "W/m²", 0), format_delta(irr_act, irr_prev)
 
             t_amb_act = df_plot["AmbientTemp_C"].mean()
@@ -314,16 +702,21 @@ def vista_general():
             t_mod_prev = df_prev[temp_col].mean() if has_prev else np.nan
             kpi3_val, kpi3_delta = format_kpi(t_mod_act, "°C", 1), format_delta(t_mod_act, t_mod_prev)
 
-            if tipo_kpi4 == "Dosis Térmica":
+            if tipo_kpi4 == "Dosis Radiación":
                 kpi4_act = (df_plot["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000
                 kpi4_prev = (df_prev["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000 if has_prev else np.nan
                 kpi4_label, kpi4_val = "Dosis Radiación Acum.", format_kpi(kpi4_act, "kWh/m²", 1)
                 kpi4_delta = format_delta(kpi4_act, kpi4_prev)
-            else:
+            elif tipo_kpi4 == "Humedad Relativa":
                 hum_act = df_plot["RelativeHumidity_pct"].mean()
                 hum_prev = df_prev["RelativeHumidity_pct"].mean() if has_prev else np.nan
                 kpi4_label, kpi4_val = "Humedad Relativa Media", format_kpi(hum_act, "%", 1)
                 kpi4_delta = format_delta(hum_act, hum_prev)
+            else: # Humedad Absoluta
+                ah_act = df_plot["AbsoluteHumidity_g_m3"].mean()
+                ah_prev = df_prev["AbsoluteHumidity_g_m3"].mean() if has_prev else np.nan
+                kpi4_label, kpi4_val = "Humedad Absoluta Media", format_kpi(ah_act, "g/m³", 2)
+                kpi4_delta = format_delta(ah_act, ah_prev)
 
             st.markdown(f"#### Telemetría Ambiental ({rango_temporal})")
             col1, col2, col3, col4 = st.columns(4)
@@ -334,12 +727,17 @@ def vista_general():
 
             st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 
-            tab_irr, tab_temp, tab_hum = st.tabs(["Irradiancia POA", "Temperaturas", "Humedad Relativa"])
+            tab_irr, tab_temp, tab_rh, tab_ah = st.tabs(["Irradiancia POA", "Temperaturas", "Humedad Relativa", "Humedad Absoluta"])
 
             with tab_irr:
-                st.markdown("##### Irradiancia POA (W/m²)")
+                st.markdown("##### Irradiancia POA Instantánea (W/m²)")
                 fig1 = crear_grafico_plotly(df_plot, "POA_Irradiance_W_m2", ["#36B9CC"], metrica_central=metrica_seleccionada)
                 st.plotly_chart(fig1, width="stretch", config=plotly_config)
+                
+                st.markdown("<hr style='margin: 1rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
+                st.markdown("##### Dosis Acumulada de Radiación (kWh/m²)")
+                fig_bar_irr = crear_grafico_barras_acumuladas(df_plot, "POA_Irradiance_W_m2", "#36B9CC", "kWh/m²", factor_conversion=(10/60)/1000)
+                st.plotly_chart(fig_bar_irr, width="stretch", config=plotly_config)
 
             with tab_temp:
                 st.markdown("##### Temperatura Ambiente vs Temperatura del Módulo (°C)")
@@ -353,36 +751,148 @@ def vista_general():
                     band_max_col="ModuleTemp_Max_C"
                 )
                 st.plotly_chart(fig2, width="stretch", config=plotly_config)
+                
+                st.markdown("<hr style='margin: 1rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
+                st.markdown("##### Carga Térmica Acumulada en Módulo (°C·h)")
+                fig_bar_temp = crear_grafico_barras_acumuladas(df_plot, mod_temp_col, "#F59E0B", "°C·h", factor_conversion=10/60)
+                st.plotly_chart(fig_bar_temp, width="stretch", config=plotly_config)
 
-            with tab_hum:
+            with tab_rh:
                 st.markdown("##### Humedad Relativa (%)")
                 fig3 = crear_grafico_plotly(df_plot, "RelativeHumidity_pct", ["#3B82F6"], metrica_central=metrica_seleccionada)
                 st.plotly_chart(fig3, width="stretch", config=plotly_config)
+                
+            with tab_ah:
+                st.markdown("##### Humedad Absoluta (g/m³)")
+                fig4 = crear_grafico_plotly(df_plot, "AbsoluteHumidity_g_m3", ["#8B5CF6"], metrica_central=metrica_seleccionada)
+                st.plotly_chart(fig4, width="stretch", config=plotly_config)
+                
+                st.markdown("<hr style='margin: 1rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
+                st.markdown("##### Dosis Acumulada de Humedad (g/m³·h)")
+                fig_bar_ah = crear_grafico_barras_acumuladas(df_plot, "AbsoluteHumidity_g_m3", "#8B5CF6", "g/m³·h", factor_conversion=10/60)
+                st.plotly_chart(fig_bar_ah, width="stretch", config=plotly_config)
     else:
-        st.warning("No se han podido cargar los datos de meteo. Comprueba la ruta del archivo Parquet.")
+        st.warning("No se han podido cargar los datos globales unificados. Comprueba la ruta.")
 
+    # =================================================================
+    # CÁLCULOS REALES PARA RENDIMIENTO GLOBAL (A PRUEBA DE FALLOS)
+    # =================================================================
     st.markdown(f"#### Rendimiento Global ({rango_temporal})")
+
+    # Identificar las columnas de potencia
+    power_cols = [col for col in df_plot.columns if 'power' in col.lower() or 'p_mpp' in col.lower()]
+
+    # ⚠️ CONSTANTE FÍSICA DE TUS CELDAS: Ajusta esto al área activa real de tus píxeles
+    AREA_CELDA_CM2 = 0.64
+    AREA_CELDA_M2 = AREA_CELDA_CM2 / 10000.0
+
+    # FUNCIONES SEGURAS MATEMÁTICAS
+    def safe_max(df_local, cols):
+        if not cols or df_local.empty: 
+            return np.nan
+        vals_sum = df_local[cols].sum(axis=1, min_count=1)
+        return vals_sum.max() if not vals_sum.isna().all() else np.nan
+
+    def calc_pce_fisico(df_local, p_cols):
+        if not p_cols or df_local.empty or 'POA_Irradiance_W_m2' not in df_local.columns: 
+            return np.nan
+        mask = df_local['POA_Irradiance_W_m2'] > 10
+        if not mask.any(): 
+            return np.nan
+            
+        pce_arrays = []
+        for c in p_cols:
+            # FÓRMULA REAL: PCE = Potencia (W) / (Irradiancia (W/m2) * Area (m2))
+            potencia_incidente_w = df_local.loc[mask, 'POA_Irradiance_W_m2'] * AREA_CELDA_M2
+            pce = df_local.loc[mask, c] / potencia_incidente_w
+            pce_arrays.append(pce)
+            
+        pce_df = pd.concat(pce_arrays)
+        return pce_df.replace([0, np.inf, -np.inf], np.nan).mean() * 100
+
+    # Ejecución sobre los DataFrames
+    potencia_max_act = safe_max(df_plot, power_cols)
+    potencia_max_prev = safe_max(df_prev, power_cols)
+
+    pce_medio_act = calc_pce_fisico(df_plot, power_cols)
+    pce_medio_prev = calc_pce_fisico(df_prev, power_cols)
+
+    # Energía Total Recibida (Dosis de Irradiancia)
+    if 'POA_Irradiance_W_m2' in df_plot.columns and not df_plot.empty:
+        energia_total_act = (df_plot["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000
+    else:
+        energia_total_act = np.nan
+
+    if 'POA_Irradiance_W_m2' in df_prev.columns and not df_prev.empty:
+        energia_total_prev = (df_prev["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000
+    else:
+        energia_total_prev = np.nan
+
+    # -----------------------------------------------------------
+    # FORMATEO INTELIGENTE DE KPIs
+    # -----------------------------------------------------------
+
+    # 1. Potencia (Escala automática entre Watts y miliWatts)
+    if pd.notna(potencia_max_act) and potencia_max_act < 1.0:
+        kpi_p1_val = format_kpi(potencia_max_act * 1000, "mW", 1)
+    else:
+        kpi_p1_val = format_kpi(potencia_max_act, "W", 2)
+        
+    kpi_p1_delta = format_delta(potencia_max_act, potencia_max_prev)
+
+    # 2. Energía
+    kpi_p2_val = format_kpi(energia_total_act, "kWh/m²", 1)
+    kpi_p2_delta = format_delta(energia_total_act, energia_total_prev)
+
+    # 3. PCE
+    kpi_p3_val = format_kpi(pce_medio_act, "%", 2)
+    kpi_p3_delta = format_delta(pce_medio_act, pce_medio_prev)
+
+    # Renderizado
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-    col_p1.metric("Potencia Máx. Flota", "4.2 kW", "+0.1 kW")
-    col_p2.metric("Energía Total", "842 kWh", "+5.2%")
-    col_p3.metric("PCE Medio", "18.4 %", "-0.2%")
-    col_p4.metric("Celdas Activas", "8 / 8", "Operativas")
+    col_p1.metric("Potencia Máx. Flota", kpi_p1_val, kpi_p1_delta)
+    col_p2.metric("Energía Total Recibida", kpi_p2_val, kpi_p2_delta)
+    col_p3.metric("PCE Medio Operativo", kpi_p3_val, kpi_p3_delta)
+    col_p4.metric("Celdas Activas", "8 / 8", "Operativas") 
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### Evolución Comparativa de la Flota (Pseudo Fill-Factor)")
     st.markdown("Superposición de las 8 celdas bajo las mismas condiciones de estrés exterior.")
 
-    np.random.seed(42)
-    df_flota = pd.DataFrame(
-        np.linspace(0.75, 0.55, 100).reshape(-1, 1) + np.random.normal(0, 0.015, size=(100, 8)),
-        index=fechas,
-        columns=["M83", "P12", "A162", "A164", "A167", "A170", "ASLRX", "M0"]
-    )
-    fig_flota = go.Figure()
-    for col in df_flota.columns:
-        fig_flota.add_trace(go.Scatter(x=df_flota.index, y=df_flota[col], mode="lines", name=col))
-    fig_flota.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)", hovermode="x unified")
-    st.plotly_chart(fig_flota, width="stretch", config=plotly_config)
+    # =================================================================
+    # GRÁFICA REAL DE SUPERVIVENCIA (pFF) CON AGREGACIÓN DINÁMICA
+    # =================================================================
+    df_survival = cargar_datos_supervivencia()
+
+    if not df_survival.empty and not df_plot.empty:
+        # 1. Sincronizamos la ventana de tiempo del pFF con la de Meteo
+        min_t = df_plot.index.min()
+        max_t = df_plot.index.max()
+        df_surv_plot = df_survival[(df_survival.index >= min_t) & (df_survival.index <= max_t)]
+
+        if not df_surv_plot.empty:
+            # 2. Transformar formato Long a Wide (Una columna por celda)
+            df_pff_wide = df_surv_plot.pivot_table(
+                index=df_surv_plot.index, 
+                columns='cell_name', 
+                values='pseudo_FF',
+                aggfunc='mean' 
+            )
+            
+            # 3. Reutilizamos tu función maestra SIN el ylabel
+            fig_flota = crear_grafico_plotly(
+                df=df_pff_wide, 
+                y_cols=list(df_pff_wide.columns), 
+                metrica_central=metrica_seleccionada
+            )
+            
+            # 4. Le inyectamos el título del eje Y a la figura generada
+            fig_flota.update_yaxes(title_text="pFF (Pseudo Fill-Factor)")
+            
+            st.plotly_chart(fig_flota, width="stretch", config=plotly_config)
+        else:
+            st.info("No hay datos de pFF registrados para este rango de fechas concreto.")
+
 
 # =====================================================================
 # VISTA 2: ANÁLISIS POR DISPOSITIVO
