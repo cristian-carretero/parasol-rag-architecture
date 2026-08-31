@@ -1,23 +1,27 @@
 """
 Module: src/anomaly_detection.py
-Description: Short-term predictive engine and anomaly detection framework.
-Trains an XGBoost Digital Twin on automatically selected healthy perovskite cells.
-Applies right-censoring at T80 and extracts physical root-cause diagnostics 
-using Explainable AI (Surrogate Decision Trees).
+Description: Short-term predictive engine and thermodynamic anomaly detection framework.
+Trains an XGBoost Digital Twin exclusively on an automatically curated baseline cohort of healthy perovskite cells.
+Applies right-censoring at the T80 degradation threshold and extracts physical root-cause 
+diagnostics utilizing Explainable AI (Surrogate Decision Trees).
 """
 
 import json
 import logging
 from pathlib import Path
+from typing import Tuple, List, Dict, Optional
+
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+
+# Ensure viz_anomaly is accessible in your PYTHONPATH or relative path
 from viz_anomaly import plot_censored_digital_twin, plot_surrogate_diagnostics
 
-# Logging configuration
+# Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -32,9 +36,9 @@ def train_and_evaluate_censored_twin(
     df: pd.DataFrame,
     irradiance_threshold: float = 100.0,
     burn_in_days: int = 14
-) -> tuple[pd.DataFrame, float, dict, pd.DataFrame, list]:
+) -> Tuple[pd.DataFrame, float, Dict[str, float], pd.DataFrame, List[str]]:
     
-    logger.info("Initializing Digital Twin Training (T80 Right-Censored)...")
+    logger.info("Initializing Digital Twin Training (T80 Right-Censored Methodology)...")
 
     # 1.1 Temporal Feature Engineering
     df_proc = df.copy()
@@ -43,7 +47,7 @@ def train_and_evaluate_censored_twin(
     df_proc['Day_Zero'] = df_proc.groupby('cell_name')['Datetime'].transform('min')
     df_proc['Exposure_Days'] = (df_proc['Datetime'] - df_proc['Day_Zero']).dt.total_seconds() / 86400.0
 
-    # 1.2 Daytime Pre-filtering
+    # 1.2 Daytime Pre-filtering (Excluding low-irradiance capacitive artifacts)
     df_daylight = df_proc[df_proc['POA_Irradiance_W_m2'] > irradiance_threshold].copy()
 
     # 1.3 Daily Max Aggregation & T80 Threshold Determination
@@ -73,15 +77,16 @@ def train_and_evaluate_censored_twin(
     for cell, group in df_daily.groupby('cell_name'):
         if group['Event'].sum() > 0:
             first_failure_idx = group['Event'].idxmax()
-            death_days[cell] = group.loc[first_failure_idx, 'Exposure_Days_max']
+            val = group.loc[first_failure_idx, 'Exposure_Days_max']
+            death_days[cell] = float(str(val))
         else:
             death_days[cell] = np.inf
 
-    # Automated selection of the healthy baseline cohort
-    healthy_cells = [cell for cell, t_death in death_days.items() if t_death > burn_in_days]
+    # Automated selection of the baseline cohort
+    healthy_cells = [str(cell) for cell, t_death in death_days.items() if t_death > burn_in_days]
     logger.info(f"Auto-detected Healthy Cohort (Survival > {burn_in_days} days): {healthy_cells}")
 
-    # 1.4 Vectorized Right-Censoring
+    # 1.4 Vectorized Right-Censoring (Removing data post-structural failure)
     df_daylight['Death_Day'] = df_daylight['cell_name'].map(death_days)
     df_censored = (
         df_daylight[df_daylight['Exposure_Days'] <= df_daylight['Death_Day']]
@@ -93,13 +98,14 @@ def train_and_evaluate_censored_twin(
     features = ['POA_Irradiance_W_m2', 'ModuleTemp_C', 'AbsoluteHumidity_g_m3']
     target = 'pseudo_FF'
 
-    # Sanitize data to prevent XGBoost errors with NaNs or Infinities
+    # Sanitize data to prevent XGBoost execution errors with NaNs or Infinities
     df_censored = df_censored.replace([np.inf, -np.inf], np.nan)
     df_censored = df_censored.dropna(subset=features + [target]).reset_index(drop=True)
 
     # 1.5 Model Training on the Selected Baseline Cohort
     train_mask = df_censored['cell_name'].isin(healthy_cells)
-    X_train, y_train = df_censored.loc[train_mask, features], df_censored.loc[train_mask, target]
+    X_train = df_censored.loc[train_mask, features]
+    y_train = df_censored.loc[train_mask, target]
 
     dt_model = xgb.XGBRegressor(
         n_estimators=150, learning_rate=0.05, max_depth=5,
@@ -112,8 +118,9 @@ def train_and_evaluate_censored_twin(
     df_censored['Underperformance'] = df_censored['Twin_pFF_Pred'] - df_censored[target]
     df_censored['Absolute_Residual'] = df_censored['Underperformance'].abs()
 
-    base_mae = mean_absolute_error(y_train, dt_model.predict(X_train))
-    alert_threshold = float(base_mae * 3)
+    # Cast to float to satisfy Pylance
+    base_mae = float(mean_absolute_error(y_train, dt_model.predict(X_train)))
+    alert_threshold = base_mae * 3.0
     df_censored['Digital_Twin_Alert'] = df_censored['Underperformance'] > alert_threshold
 
     t80_lookup = df_daily.drop_duplicates('cell_name').set_index('cell_name')['T80_threshold'].to_dict()
@@ -126,7 +133,7 @@ def train_and_evaluate_censored_twin(
 # 2. LOOCV (LEAVE-ONE-OUT CROSS-VALIDATION) FRAMEWORK
 # =====================================================================
 
-def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list) -> pd.DataFrame:
+def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: List[str]) -> pd.DataFrame:
     features = ['POA_Irradiance_W_m2', 'ModuleTemp_C', 'AbsoluteHumidity_g_m3']
     target = 'pseudo_FF'
     loocv_results = []
@@ -137,8 +144,10 @@ def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list) -> 
         train_mask = df_censored['cell_name'].isin(train_cells)
         test_mask = df_censored['cell_name'] == holdout_cell
 
-        X_train, y_train = df_censored.loc[train_mask, features], df_censored.loc[train_mask, target]
-        X_test, y_test = df_censored.loc[test_mask, features], df_censored.loc[test_mask, target]
+        X_train = df_censored.loc[train_mask, features]
+        y_train = df_censored.loc[train_mask, target]
+        X_test = df_censored.loc[test_mask, features]
+        y_test = df_censored.loc[test_mask, target]
 
         loocv_model = xgb.XGBRegressor(
             n_estimators=150, learning_rate=0.05, max_depth=5,
@@ -147,16 +156,23 @@ def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list) -> 
         loocv_model.fit(X_train, y_train)
 
         train_preds = loocv_model.predict(X_train)
-        base_mae = mean_absolute_error(y_train, train_preds)
-        alert_threshold = float(base_mae * 3)
+        
+        # Explicit numpy cast to avoid Pylance ArrayLike warnings with Pandas Series
+        y_train_np = y_train.to_numpy()
+        y_test_np = y_test.to_numpy()
+        
+        base_mae = float(mean_absolute_error(y_train_np, train_preds))
+        alert_threshold = base_mae * 3.0
 
         test_preds = loocv_model.predict(X_test)
-        holdout_mae = mean_absolute_error(y_test, test_preds)
+        holdout_mae = float(mean_absolute_error(y_test_np, test_preds))
 
-        underperformance = test_preds - y_test
+        underperformance = test_preds - y_test_np
 
-        alert_count = (underperformance > alert_threshold).sum()
-        alert_pct = (alert_count / len(y_test)) * 100.0 if len(y_test) > 0 else 0.0
+        # Cast boolean array sum to int
+        alert_count = int((underperformance > alert_threshold).sum())
+        total_samples = len(y_test_np)
+        alert_pct = (alert_count / total_samples) * 100.0 if total_samples > 0 else 0.0
 
         loocv_results.append({
             'Holdout_Cell': holdout_cell,
@@ -173,7 +189,7 @@ def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list) -> 
 # 3. DIAGNOSTIC RISK ASSESSMENT GENERATOR
 # =====================================================================
 
-def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: dict, burn_in_days: int = 14, min_points_required: int = 100) -> pd.DataFrame:
+def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: Dict[str, float], burn_in_days: int = 14, min_points_required: int = 100) -> pd.DataFrame:
     df_sorted = df_twin.sort_values(by=['cell_name', 'Datetime']).copy()
 
     # 1. Cumulative alert rate calculation
@@ -190,6 +206,9 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: dict, burn_in
     )
     crossed_15 = df_sorted[valid_crossing]
     time_15pct = crossed_15.groupby('cell_name')['Exposure_Days'].min()
+    
+    # Safely convert to dictionary to satisfy Pylance map requirements
+    time_15pct_dict = time_15pct.to_dict()
 
     # 3. Aggregated diagnostic summary
     summary = df_twin.groupby('cell_name').agg(
@@ -198,14 +217,14 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: dict, burn_in
     )
 
     summary['Alert_Freq_Pct'] = (summary['Alert_Count'] / summary['Data_Points']) * 100.0
-    summary['Survival_Days'] = [death_days.get(c, np.inf) for c in summary.index]
+    summary['Survival_Days'] = [death_days.get(str(c), np.inf) for c in summary.index]
     early_collapse = summary['Survival_Days'] <= burn_in_days
 
     # Extrinsic failure condition (early T80 collapse OR severe anomaly rate >15%)
     summary['Extrinsic_Failure'] = early_collapse | (summary['Alert_Freq_Pct'] > 15.0)
 
     # Conditional mapping: Timestamp of crossing only for confirmed extrinsic failures
-    raw_time_15pct = summary.index.map(time_15pct)
+    raw_time_15pct = summary.index.map(lambda x: time_15pct_dict.get(x, np.nan))
     summary['Threshold_15pct_Day'] = np.where(summary['Extrinsic_Failure'], raw_time_15pct, np.nan)
 
     # Clean up and sort by alert severity
@@ -214,34 +233,41 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, death_days: dict, burn_in
 
 
 # =====================================================================
-# 5. EXPLAINABILITY & ROOT CAUSE ANALYSIS (SURROGATE TREES)
+# 4. EXPLAINABILITY & ROOT CAUSE ANALYSIS (SURROGATE TREES)
 # =====================================================================
 
-def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day: float, window_days: float = 2.0):
+def extract_surrogate_rules(
+    df_twin: pd.DataFrame, 
+    cell_name: str, 
+    threshold_day: float, 
+    window_days: float = 2.0
+) -> Tuple[Optional[DecisionTreeClassifier], Optional[List[str]], Optional[str]]:
+    
     if pd.isna(threshold_day):
         return None, None, None
 
-    # Isolate the critical temporal window
+    # Isolate the critical temporal window preceding the anomaly threshold
     window_data = df_twin[(df_twin['cell_name'] == cell_name) & 
                           (df_twin['Exposure_Days'] <= threshold_day + window_days)].copy()
     
     features = ['ModuleTemp_C', 'POA_Irradiance_W_m2', 'AbsoluteHumidity_g_m3']
     target = 'Digital_Twin_Alert'
 
-    # Verify adequate variance to fit the tree
+    # Verify adequate variance to compile a meaningful decision tree
     if window_data[target].nunique() < 2:
-        logger.warning(f"[{cell_name}] Insufficient variance to train surrogate tree.")
+        logger.warning(f"[{cell_name}] Insufficient variance in anomaly classifications to train surrogate tree.")
         return None, None, None
 
     X = window_data[features]
     y = window_data[target].astype(int)
 
-    # Train a shallow decision tree to ensure human interpretability
+    # Train a shallow, regularized decision tree to enforce human interpretability
     surrogate_tree = DecisionTreeClassifier(max_depth=3, class_weight='balanced', random_state=42)
     surrogate_tree.fit(X, y)
 
-    # Extract rules as text for console output and JSON logging
+    # Extract deterministic rules as text for console reporting and JSON logging
     tree_rules = export_text(surrogate_tree, feature_names=features, decimals=1)
+    
     print("\n" + "="*85)
     print(f" SURROGATE RULE EXTRACTION: [{cell_name}] (Critical Window up to Day {threshold_day + window_days:.1f})")
     print("-" * 85)
@@ -252,23 +278,28 @@ def extract_surrogate_rules(df_twin: pd.DataFrame, cell_name: str, threshold_day
 
 
 # =====================================================================
-# 6. EXECUTION PIPELINE
+# 5. EXECUTION PIPELINE
 # =====================================================================
 
 if __name__ == "__main__":
-    # Define absolute paths explicitly to avoid nesting inside /data
-    PROJECT_ROOT = Path(r"C:\Users\crica\OneDrive - UNIVERSIDAD DE SEVILLA\Escritorio\parasol-rag-architecture-main")
-    DATA_DIR = PROJECT_ROOT / "data" / "processed" / "outdoor"
-    survival_file = DATA_DIR / "survival_dataset.parquet"
     
-    # Configure figure export directory strictly in /outputs/figures/anomaly_detection
-    FIGURES_DIR = PROJECT_ROOT / "outputs" / "figures" / "anomaly_detection"
+    # Define absolute/relative paths rigorously for the execution context
+    SURVIVAL_DIR = Path("data/survival/outdoor")
+    survival_file = SURVIVAL_DIR / "survival_dataset.parquet"
+    
+    ANOMALY_DIR = Path("data/anomaly/outdoor")
+    ANOMALY_DIR.mkdir(parents=True, exist_ok=True)
+
+    DIAGNOSTICS_DIR = Path("data/anomaly/diagnostics/")
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+
+    FIGURES_DIR = Path("outputs/figures/anomaly_detection")
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     
     if not survival_file.exists():
-        logger.error(f"Survival dataset not found at: {survival_file}")
+        logger.error(f"Survival dataset artifact not found at: {survival_file}")
     else:
-        logger.info(f"Loading survival dataset from: {survival_file}")
+        logger.info(f"Loading survival dataset matrix from: {survival_file}")
         df_final = pd.read_parquet(survival_file)
 
         # 1. Automated baseline training and healthy cohort selection
@@ -277,7 +308,7 @@ if __name__ == "__main__":
             burn_in_days=14
         )
 
-        # 2. Cross-validation across the nominal baseline cohort
+        # 2. Cross-validation topology across the nominal baseline cohort
         print("\n" + "=" * 90)
         print("                    LOOCV STABILITY VALIDATION (HEALTHY COHORT)                    ")
         print("=" * 90)
@@ -309,7 +340,7 @@ if __name__ == "__main__":
         # ---------------------------------------------------------------------
         # DATA EXPORT 1: Enriched Parquet Dataset (KEEPING ALL ORIGINAL ROWS)
         # ---------------------------------------------------------------------
-        logger.info("Enriching the original dataset with anomaly metrics without dropping rows...")
+        logger.info("Enriching the original dataset architecture with dynamic anomaly metrics...")
         
         # Merge 1: Inject dynamic twin predictions mapped by cell and timestamp
         df_enriched_full = df_final.merge(
@@ -326,48 +357,52 @@ if __name__ == "__main__":
             how='left'
         )
         
-        # Ensure boolean defaults for non-daylight rows that Twin didn't evaluate
+        # Ensure boolean defaults for non-daylight rows omitted by the Digital Twin
         df_enriched_full['Digital_Twin_Alert'] = df_enriched_full['Digital_Twin_Alert'].fillna(False)
 
-        enriched_parquet_path = DATA_DIR / "anomaly_scored_dataset.parquet"
+        enriched_parquet_path = ANOMALY_DIR / "anomaly_scored_dataset.parquet"
         df_enriched_full.to_parquet(enriched_parquet_path, engine='pyarrow', compression='snappy')
-        logger.info(f"Exported full anomaly-scored dataset ({len(df_enriched_full)} rows) to: {enriched_parquet_path.name}")
+        logger.info(f"Exported anomaly-scored telemetry matrix ({len(df_enriched_full)} rows) to: {enriched_parquet_path.name}")
 
         # 4. Anomaly visualization and XAI diagnostic profiling via viz_anomaly.py
         defective_cells = summary_table[summary_table['Extrinsic_Failure']].index.tolist()
-        logger.info(f"Generating anomaly profiles and root-cause diagnostics for defective devices: {defective_cells}")
-        logger.info(f"Saving figures to: {FIGURES_DIR}")
+        logger.info(f"Initiating anomaly visual profiling and root-cause diagnostics for defective devices: {defective_cells}")
+        logger.info(f"Exporting graphical artifacts to: {FIGURES_DIR}")
 
         xai_diagnostics_dict = {}
 
         for cell_id in defective_cells:
-            t_day = summary_table.loc[cell_id, 'Threshold_15pct_Day']
+            # Force cast to float to satisfy Pylance strict typings, handle NaNs
+            raw_t_day = summary_table.loc[cell_id, 'Threshold_15pct_Day']
+            t_day = float(str(raw_t_day)) if pd.notna(raw_t_day) else np.nan
             
-            # Step 1: Render and export Digital Twin tracking plot
+            # Step 1: Render and export Digital Twin spatial tracking plot
             plot_censored_digital_twin(df_twin_results, cell_id, alert_threshold, t_day, FIGURES_DIR)
             
-            # Step 2: Fit surrogate decision tree and extract explicit rule hierarchy
+            # Step 2: Fit surrogate decision tree and extract explicit physical rule hierarchy
             tree_model, feat_names, tree_rules = extract_surrogate_rules(df_twin_results, cell_id, t_day)
             
-            # Step 3: Render and export surrogate tree diagnostics and feature attributions
-            if tree_model is not None:
+            # Step 3: Render and export surrogate tree diagnostics and physical feature attributions
+            if tree_model is not None and feat_names is not None:
                 plot_surrogate_diagnostics(tree_model, feat_names, cell_id, t_day, FIGURES_DIR)
                 
-                # Store XAI information for JSON export
+                # Store XAI information payload for downstream JSON integration
+                extracted_rules_list = tree_rules.strip().split('\n') if isinstance(tree_rules, str) else []
+                
                 xai_diagnostics_dict[cell_id] = {
                     "Threshold_15pct_Day": float(t_day) if pd.notna(t_day) else None,
                     "Features_Used": feat_names,
-                    "Extracted_Rules": tree_rules.strip().split('\n')
+                    "Extracted_Rules": extracted_rules_list
                 }
 
         # ---------------------------------------------------------------------
         # DATA EXPORT 2: XAI Surrogate Rules JSON
         # ---------------------------------------------------------------------
         if xai_diagnostics_dict:
-            xai_json_path = DATA_DIR / "xai_surrogate_rules.json"
+            xai_json_path = DIAGNOSTICS_DIR / "xai_surrogate_rules.json"
             with open(xai_json_path, 'w', encoding='utf-8') as f:
                 json.dump(xai_diagnostics_dict, f, indent=4)
-            logger.info(f"Exported XAI surrogate rules to: {xai_json_path.name}")
+            logger.info(f"Exported deterministic XAI surrogate rules to: {xai_json_path.name}")
 
         validated_cells = summary_table[~summary_table['Extrinsic_Failure']].index.tolist()
-        logger.info(f"Final validated cohort secured for long-term prognostic modeling: {validated_cells}")
+        logger.info(f"Final validated healthy cohort secured for downstream long-term prognostic modeling: {validated_cells}")

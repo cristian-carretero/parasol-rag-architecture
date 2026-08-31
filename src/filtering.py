@@ -244,62 +244,95 @@ def analyze_curve_timings(jv_df: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    PROCESSED_DIR = Path("data/processed/outdoor")
-    
+    PROCESSED_DIR = Path("data/processed/outdoor/")
+    FILTERED_DIR = Path("data/filtered/outdoor/")
+    FILTERED_DIR.mkdir(parents=True, exist_ok=True)
+    METADATA_DIR = Path("data/filtered/metadata/outdoor/")
+    METADATA_DIR.mkdir(parents=True, exist_ok=True)
+
     if not PROCESSED_DIR.exists():
         logger.error(f"Target directory missing: {PROCESSED_DIR}. Verify execution of the upstream data processing module.")
         raise FileNotFoundError(f"Directory {PROCESSED_DIR} not found.")
 
     device_dirs = [d.name for d in PROCESSED_DIR.iterdir() if d.is_dir()]
-    raw_data_dict = {}
-
     logger.info(f"Discovered processed datasets for localized devices: {device_dirs}")
     
-    for name in device_dirs:
+    all_cleaned_dfs = []
+    warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+    # Sequential loading and filtering per device to prevent OOM
+    for cell_id, name in enumerate(device_dirs):
         parquet_path = PROCESSED_DIR / name / f"{name}_jv.parquet"
         if parquet_path.exists():
+            logger.info(f"Loading raw telemetry for device: {name}")
             df = pd.read_parquet(parquet_path)
+            
             if not df.empty:
-                raw_data_dict[name] = df
+                logger.info(f"Executing filter topology on device: {name}")
+                cleaned_df = _process_single_cell(
+                    df=df,
+                    name=name,
+                    cell_id=cell_id,
+                    v_span_thresh=50,
+                    freeze_thresh=15,
+                    i_span_thresh=0.0001,
+                    spike_tol=2
+                )
+                all_cleaned_dfs.append(cleaned_df)
+                del df
+                gc.collect()
+            else:
+                logger.warning(f"Parquet file for device {name} is empty.")
         else:
             logger.warning(f"Expected Parquet artifact missing for device: {name}")
 
-    if raw_data_dict:
-        # 1. Execute the core filtering engine
-        jv_dataset_filtered = process_all_jv_curves(
-            raw_dfs_dict=raw_data_dict,
-            v_span_threshold_mv=50,
-            i_span_threshold_A=0.0001,
-            spike_tol=2
-        )
+    if all_cleaned_dfs:
+        logger.info("Consolidating processed device chunks...")
+        jv_dataset_filtered = pd.concat(all_cleaned_dfs, axis=0, ignore_index=True)
+        
+        del all_cleaned_dfs
+        gc.collect()
 
-        # 2. Output final audit metrics
+        jv_dataset_filtered['id_curve'] = jv_dataset_filtered.groupby(['cell_name', 'curve']).ngroup()
+
+        # --- DIAGNOSTICS REPORTING ---
+        logger.info("Aggregating global diagnostics report...")
+        summary = jv_dataset_filtered.groupby(['cell_name', 'curve']).first()
+
+        try:
+            val_counts = summary.groupby('cell_name')['is_curve_valid'].agg(['count', 'sum'])
+            val_counts.columns = ['Total Cycles Detected', 'Valid Cycles Retained']
+            
+            report = (
+                f"\n=== QUALITY CONTROL METRICS ===\n"
+                f"Aggregate cycles evaluated globally: {len(summary)}\n\n"
+                f"Cycle Yield Distribution by Device:\n{val_counts}\n"
+            )
+            logger.info(report)
+        except Exception as e:
+            logger.warning(f"Diagnostics aggregation failed: {e}")
+
+        # Output final audit metrics
         logger.info("\n--- PIPELINE RETENTION AUDIT ---")
         logger.info(f"Raw Vector Dimensions (Rows):\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].count().to_string()}")
         logger.info(f"Gross Cycle Count:\n{jv_dataset_filtered.groupby('is_reverse')['id_curve'].nunique().to_string()}")
         logger.info(f"Net Valid Cycle Count (Post-Filter):\n{jv_dataset_filtered[jv_dataset_filtered['is_curve_valid'] == 1].groupby('is_reverse')['id_curve'].nunique().to_string()}")
 
-        # 3. Analyze time dynamics
+        # Analyze time dynamics
         analyze_curve_timings(jv_dataset_filtered)
         
-        # --- MACHINE LEARNING METADATA EXPORT ---
-        logger.info("\n--- MACHINE LEARNING METADATA EXPORT ---")
-        
+        # --- QUALITY ASSURANCE & DATASET METADATA EXPORT ---
+        logger.info("\n--- QUALITY ASSURANCE & DATASET METADATA EXPORT ---")
         valid_only_df = jv_dataset_filtered[jv_dataset_filtered['is_curve_valid'] == 1]
         valid_counts_dict = valid_only_df.groupby('cell_name')['id_curve'].nunique().to_dict()
         
-        logger.info("Volume of structurally sound curves available for ML training per device:")
-        for cell_name, count in valid_counts_dict.items():
-            logger.info(f"  {cell_name}: {count} curves")
-            
-        metadata_path = PROCESSED_DIR / "valid_curves_summary.json"
+        metadata_path = METADATA_DIR / "valid_curves_summary.json"
         with open(metadata_path, 'w') as f:
             json.dump(valid_counts_dict, f, indent=4)
         logger.info(f"Dataset structural metadata successfully serialized to: {metadata_path}")
-        # -------------------------------------------------------------
         
-        # 4. Serialize dataset to disk
-        output_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
+        # Serialize dataset to disk
+        output_path = FILTERED_DIR / "jv_dataset_filtered.parquet"
         logger.info(f"Serializing filtered dataset artifact to {output_path}...")
         
         jv_dataset_filtered.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
@@ -307,3 +340,5 @@ if __name__ == "__main__":
         
     else:
         logger.error("Data ingestion failure: No valid Parquet artifacts were loaded into memory.")
+
+    warnings.filterwarnings('default', category=RuntimeWarning)

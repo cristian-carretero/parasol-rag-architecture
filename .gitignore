@@ -7,8 +7,7 @@ __pycache__/
 *.pyc
 
 # Data (do not version heavy files)
-data/raw/
-data/processed/
+data/
 
 # System or IDE files
 .DS_Store

@@ -107,16 +107,19 @@ def build_survival_features(jv_labeled_path: Path, meteo_base_dir: Path, output_
 
 if __name__ == "__main__":
     # Path definitions adjusted for local structure
-    BASE_DIR = Path(r"C:\Users\crica\OneDrive - UNIVERSIDAD DE SEVILLA\Escritorio\parasol-rag-architecture-main\data\processed\outdoor")
+    PROCESSED_DIR = Path("data/processed/outdoor")
+    LABELED_DIR = Path("data/clustered/outdoor")
+    SURVIVAL_DIR = Path("data/survival/outdoor")
+    SURVIVAL_DIR.mkdir(parents=True, exist_ok=True)
     
-    jv_labeled_file = BASE_DIR / "jv_dataset_labeled.parquet"
-    out_file = BASE_DIR / "survival_dataset.parquet"
-    
+    jv_labeled_file = LABELED_DIR / "jv_dataset_labeled.parquet"
+    out_file = SURVIVAL_DIR / "survival_dataset.parquet"
+
     # Pipeline execution
     if jv_labeled_file.exists():
         df_final = build_survival_features(
             jv_labeled_path=jv_labeled_file, 
-            meteo_base_dir=BASE_DIR, 
+            meteo_base_dir=PROCESSED_DIR,   
             output_path=out_file
         )
         
