@@ -185,16 +185,16 @@ def get_optimal_k(X_pca: np.ndarray, pca_model: PCA, max_k: int = 8, sample_size
     dists_to_line = np.linalg.norm(vecs_from_first - vec_projections, axis=1)
 
     # 2. Console Visual Diagnostic Block
-    print("\n" + "=" * 105)
+    print("\n" + "=" * 60)
     print(" [DIAGNOSTICS] AUTOMATED TOPOLOGICAL K-SELECTION SPACE EVALUATION")
-    print("=" * 105)
+    print("=" * 60)
     print(f" {'K':<4} | {'Inertia (↓)':<13} | {'Elbow Dist (↑)':<15} | {'Silhouette (↑)':<15} | {'Davies-Bouldin (↓)':<18} | {'Min ΔpFF (↑)':<12}")
-    print("-" * 105)
+    print("-" * 60)
     
     for i, k in enumerate(k_range):
         flag = " *" if (k >= min_valid_k and min_dpff[i] >= min_dpff_thresh) else "  "
         print(f" {k:<4}{flag}| {inertia[i]:<13.2f} | {dists_to_line[i]:<15.4f} | {silhouette[i]:<15.4f} | {davies[i]:<18.4f} | {min_dpff[i]:<12.4f}")
-    print("=" * 105)
+    print("=" * 60)
 
     # 3. Consensus Logic (Strictly ignoring physically redundant K values)
     valid_indices = [i for i, k in enumerate(k_range) if k >= min_valid_k and min_dpff[i] >= min_dpff_thresh]
@@ -224,12 +224,12 @@ def get_optimal_k(X_pca: np.ndarray, pca_model: PCA, max_k: int = 8, sample_size
     print(f" -> Optimal Geometric Elbow (Valid space) : {best_elbow_k}")
     print(f" -> Max Silhouette Score (Valid space)    : {best_sil_k}")
     print(f" -> Min Davies-Bouldin Index (Valid space): {best_db_k}")
-    print("-" * 105)
+    print("-" * 60)
     if consensus:
         print(f" >> FINAL SELECTED k : {final_k} (Statistical Consensus Override)")
     else:
         print(f" >> FINAL SELECTED k : {final_k} (Geometric Elbow Anchor)")
-    print("=" * 105 + "\n")
+    print("=" * 60 + "\n")
 
     return final_k
 
@@ -243,11 +243,11 @@ def analyze_cluster_medoids(centers_orig: np.ndarray, n_points: int = 50) -> Tup
     metrics = []
     invalid_clusters = []
     
-    print("\n" + "=" * 95)
+    print("\n" + "=" * 60)
     print(" [XAI DIAGNOSTICS] THERMODYNAMIC MEDOID VALIDATION (AUTO-PRUNING)")
-    print("=" * 95)
+    print("=" * 60)
     print(f" {'Cluster':<7} | {'J_sc @ V=0 (≥0.5)':<19} | {'J_oc @ V=Voc (≤0.3)':<21} | {'Pos. Slope % (≤15%)':<20} | {'Status'}")
-    print("-" * 95)
+    print("-" * 60)
     
     for i, center in enumerate(centers_orig):
         # Arrays are strictly ordered V=0 -> V=Voc due to interpolation mapping
@@ -282,7 +282,7 @@ def analyze_cluster_medoids(centers_orig: np.ndarray, n_points: int = 50) -> Tup
         
         print(f" {i:<7} | {j_sc:<19.2f} | {j_oc:<21.2f} | {positive_slope_ratio:<20.2%} | {status}")
         
-    print("=" * 95 + "\n")
+    print("=" * 60 + "\n")
     return pd.DataFrame(metrics), invalid_clusters
 
 
@@ -292,7 +292,7 @@ def train_kmedoids_pipeline(
     n_clusters: int | None = None, 
     n_pca_components: int | None = None,
     max_train_samples: int = 3000,
-    contamination: float = 0.01
+    contamination: float = 0.03
 ) -> Dict[str, Any]:
     """
     Core Unsupervised Pipeline: PCA Dimensionality Reduction -> Isolation Forest -> K-Medoids -> Pseudo-FF Reordering.
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     FILTERED_DIR = Path("data/filtered/outdoor")
     CLUSTERED_DIR = Path("data/clustered/outdoor")
     CLUSTERED_DIR.mkdir(parents=True, exist_ok=True)
-    ARTIFACTS_DIR = Path("data/clustered/artifacts/outdoor")
+    ARTIFACTS_DIR = Path("data/clustered/artifacts")
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     filtered_parquet_path = FILTERED_DIR / "jv_dataset_filtered.parquet"

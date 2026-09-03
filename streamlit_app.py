@@ -143,12 +143,19 @@ def create_plotly_chart(df, y_cols, color_seq=None, central_metric="Mean", band_
         df_1h_main = df.resample("1h").agg(agg_func, numeric_only=True)
         df_1h_min = df.resample("1h").min(numeric_only=True)
         df_1h_max = df.resample("1h").max(numeric_only=True)
+        
+        df_6h_main = df.resample("6h").agg(agg_func, numeric_only=True)
+        df_6h_min = df.resample("6h").min(numeric_only=True)
+        df_6h_max = df.resample("6h").max(numeric_only=True)
+        
         df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
         df_1d_min = df.resample("1D").min(numeric_only=True)
         df_1d_max = df.resample("1D").max(numeric_only=True)
+        
         df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
         df_7d_min = df.resample("7D").min(numeric_only=True)
         df_7d_max = df.resample("7D").max(numeric_only=True)
+        
         for i, col in enumerate(y_cols):
             c = color_seq[i % len(color_seq)]
             c_fill = hex_to_rgba(c, 0.25)
@@ -157,25 +164,37 @@ def create_plotly_chart(df, y_cols, color_seq=None, central_metric="Mean", band_
             b_min = band_min_col if use_band else col
             b_max = band_max_col if use_band else col
 
+            # 1H (Por defecto visible)
             fig.add_trace(go.Scatter(x=df_1h_min.index, y=df_1h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1h_max.index, y=df_1h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1h_main.index, y=df_1h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=True, connectgaps=True))
+            
+            # 6H
+            fig.add_trace(go.Scatter(x=df_6h_min.index, y=df_6h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_6h_max.index, y=df_6h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_6h_main.index, y=df_6h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 6H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=False, connectgaps=True))
+
+            # 1D
             fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
+            
+            # 7D
             fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
 
         n = len(y_cols)
-        vis_1h = ([True, True, True, False, False, False, False, False, False]) * n
-        vis_1d = ([False, False, False, True, True, True, False, False, False]) * n
-        vis_7d = ([False, False, False, False, False, False, True, True, True]) * n
+        vis_1h = ([True, True, True, False, False, False, False, False, False, False, False, False]) * n
+        vis_6h = ([False, False, False, True, True, True, False, False, False, False, False, False]) * n
+        vis_1d = ([False, False, False, False, False, False, True, True, True, False, False, False]) * n
+        vis_7d = ([False, False, False, False, False, False, False, False, False, True, True, True]) * n
 
-        trace_indices = list(range(9 * n))
+        trace_indices = list(range(12 * n))
 
         buttons_agg = [
             dict(label=f"{label_stat} Hourly (1H)", method="restyle", args=[{"visible": vis_1h}, trace_indices]),
+            dict(label=f"{label_stat} 6-Hourly (6H)", method="restyle", args=[{"visible": vis_6h}, trace_indices]),
             dict(label=f"{label_stat} Daily (1D)", method="restyle", args=[{"visible": vis_1d}, trace_indices]),
             dict(label=f"{label_stat} Weekly (7D)", method="restyle", args=[{"visible": vis_7d}, trace_indices]),
         ]
@@ -186,15 +205,22 @@ def create_plotly_chart(df, y_cols, color_seq=None, central_metric="Mean", band_
         ]
 
     else:
+        df_6h_main = df.resample("6h").agg(agg_func, numeric_only=True)
+        df_6h_min = df.resample("6h").min(numeric_only=True)
+        df_6h_max = df.resample("6h").max(numeric_only=True)
+        
         df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
         df_1d_min = df.resample("1D").min(numeric_only=True)
         df_1d_max = df.resample("1D").max(numeric_only=True)
+        
         df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
         df_7d_min = df.resample("7D").min(numeric_only=True)
         df_7d_max = df.resample("7D").max(numeric_only=True)
+        
         df_30d_main = df.resample("30D").agg(agg_func, numeric_only=True)
         df_30d_min = df.resample("30D").min(numeric_only=True)
         df_30d_max = df.resample("30D").max(numeric_only=True)
+        
         for i, col in enumerate(y_cols):
             c = color_seq[i % len(color_seq)]
             c_fill = hex_to_rgba(c, 0.25)
@@ -203,30 +229,42 @@ def create_plotly_chart(df, y_cols, color_seq=None, central_metric="Mean", band_
             b_min = band_min_col if use_band else col
             b_max = band_max_col if use_band else col
 
+            # 6H
+            fig.add_trace(go.Scatter(x=df_6h_min.index, y=df_6h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_6h_max.index, y=df_6h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(x=df_6h_main.index, y=df_6h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 6H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=False, connectgaps=True))
+
+            # 1D (Por defecto visible en historical)
             fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=6), visible=True, connectgaps=True))
+            
+            # 7D
             fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
+            
+            # 30D
             fig.add_trace(go.Scatter(x=df_30d_min.index, y=df_30d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_30d_max.index, y=df_30d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
             fig.add_trace(go.Scatter(x=df_30d_main.index, y=df_30d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 30D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=10), visible=False, connectgaps=True))
 
         n = len(y_cols)
-        vis_1d = ([True, True, True, False, False, False, False, False, False]) * n
-        vis_7d = ([False, False, False, True, True, True, False, False, False]) * n
-        vis_30d = ([False, False, False, False, False, False, True, True, True]) * n
+        vis_6h = ([True, True, True, False, False, False, False, False, False, False, False, False]) * n
+        vis_1d = ([False, False, False, True, True, True, False, False, False, False, False, False]) * n
+        vis_7d = ([False, False, False, False, False, False, True, True, True, False, False, False]) * n
+        vis_30d = ([False, False, False, False, False, False, False, False, False, True, True, True]) * n
 
-        trace_indices = list(range(9 * n))
+        trace_indices = list(range(12 * n))
 
         buttons_agg = [
+            dict(label=f"{label_stat} 6-Hourly (6H)", method="restyle", args=[{"visible": vis_6h}, trace_indices]),
             dict(label=f"{label_stat} Daily (1D)", method="restyle", args=[{"visible": vis_1d}, trace_indices]),
             dict(label=f"{label_stat} Weekly (7D)", method="restyle", args=[{"visible": vis_7d}, trace_indices]),
             dict(label=f"{label_stat} Monthly (30D)", method="restyle", args=[{"visible": vis_30d}, trace_indices]),
         ]
         updatemenus_config = [
-            dict(type="buttons", direction="right", buttons=buttons_agg, active=0, showactive=True,
+            dict(type="buttons", direction="right", buttons=buttons_agg, active=1, showactive=True,
                  x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
                  bgcolor="#F8FAFC", bordercolor="#E2E8F0")
         ]
@@ -615,6 +653,7 @@ def general_overview():
                 st.markdown("##### Accumulated Humidity Dose (g/m³·h)")
                 fig_bar_ah = create_accumulated_bar_chart(plot_df, "AbsoluteHumidity_g_m3", "#8B5CF6", "g/m³·h", conversion_factor=10 / 60)
                 st.plotly_chart(fig_bar_ah, width="stretch", config=plotly_config)
+
     # =================================================================
     # OVERALL PERFORMANCE AND ML DIAGNOSTICS
     # =================================================================
@@ -879,6 +918,7 @@ def general_overview():
             st.plotly_chart(fleet_fig, width="stretch", config=plotly_config)
         else:
             st.info("No pFF data recorded for this specific date range.")
+
 # =====================================================================
 # VIEW 2: DEVICE ANALYSIS
 # =====================================================================

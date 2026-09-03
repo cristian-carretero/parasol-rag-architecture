@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger("Viz-Filtering")
 sns.set_theme(style="whitegrid")
 
-OUTPUT_DIR = Path("outputs/figures")
+OUTPUT_DIR = Path("outputs/figures/filtering")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def analyze_histogram(data: pd.Series, name: str, n_bins: int | str = 'auto') -> pd.DataFrame:
@@ -70,21 +70,21 @@ def plot_voltage_span_distribution(jv_df: pd.DataFrame, stage_name: str = "Pre-F
     plt.close()
 
 if __name__ == "__main__":
-    PROCESSED_DIR = Path("data/processed/outdoor")
+    FILTERED_DIR = Path("data/filtered/outdoor")
     
-    if not PROCESSED_DIR.exists():
-        logger.error(f"Directory {PROCESSED_DIR} not found.")
+    if not FILTERED_DIR.exists():
+        logger.error(f"Directory {FILTERED_DIR} not found.")
         exit(1)
 
     # ==========================================
     # 1. PRE-FILTER VISUALIZATION
     # ==========================================
-    device_dirs = [d.name for d in PROCESSED_DIR.iterdir() if d.is_dir()]
+    device_dirs = [d.name for d in FILTERED_DIR.iterdir() if d.is_dir()]
     processed_dfs = []
     logger.info(f"Scanning raw devices for Pre-Filter visualization: {device_dirs}")
 
     for name in device_dirs:
-        parquet_path = PROCESSED_DIR / name / f"{name}_jv.parquet"
+        parquet_path = FILTERED_DIR / name / f"{name}_jv.parquet"
         if parquet_path.exists():
             df = pd.read_parquet(parquet_path, columns=['ScanDirection', 'Voltage_V', 'Timestamp'])
             if not df.empty:
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     # ==========================================
     # 2. POST-FILTER VISUALIZATION
     # ==========================================
-    filtered_parquet_path = PROCESSED_DIR / "jv_dataset_filtered.parquet"
+    filtered_parquet_path = FILTERED_DIR / "jv_dataset_filtered.parquet"
     if filtered_parquet_path.exists():
         logger.info("Loading post-filter dataset...")
         

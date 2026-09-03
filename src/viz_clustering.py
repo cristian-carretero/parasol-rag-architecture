@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("Viz-Clustering")
 sns.set_theme(style="whitegrid")
 
-OUTPUT_DIR = Path("outputs/figures")
+OUTPUT_DIR = Path("outputs/figures/clustering")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def plot_pca_variance_and_loadings(pca_full, pca, n_points: int = 50, filename: str = "01_pca_variance_loadings.png"):
@@ -196,10 +196,10 @@ def plot_3d_pca_interactive(jv_labeled: pd.DataFrame, curves_normalized: pd.Seri
     logger.info(f"Interactive 3D plot saved: {output_path}")
 
 if __name__ == "__main__":
-    PROCESSED_DIR = Path("data/processed/outdoor")
-    
-    parquet_path = PROCESSED_DIR / "jv_dataset_labeled.parquet"
-    joblib_path = PROCESSED_DIR / "clustering_artifacts.joblib"
+    CLUSTERED_DIR = Path("data/clustered/outdoor")
+    ARTIFACTS_DIR = Path("data/clustered/artifacts")
+    parquet_path = CLUSTERED_DIR / "jv_dataset_labeled.parquet"
+    joblib_path = ARTIFACTS_DIR / "clustering_artifacts.joblib"
     
     if not (parquet_path.exists() and joblib_path.exists()):
         logger.error("Required data or artifacts missing. Ensure src/clustering.py was run.")
