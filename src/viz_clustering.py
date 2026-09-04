@@ -2,6 +2,8 @@
 Module: src/viz_clustering.py
 Description: Advanced Machine Learning visualizations (PCA, K-Medoids). 
 Loads pre-trained artifacts to decouple execution from the training pipeline.
+Implements extreme memory optimizations and discrete semantic colormapping 
+to handle structurally pruned (anomalous) clusters gracefully.
 """
 
 import math
@@ -12,14 +14,12 @@ import joblib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import seaborn as sns
 import plotly.express as px
-
-import matplotlib.transforms as transforms
-from matplotlib.patches import Ellipse
-from matplotlib.axes import Axes  
 from sklearn.decomposition import PCA
 
+# Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -30,9 +30,11 @@ sns.set_theme(style="whitegrid")
 OUTPUT_DIR = Path("outputs/figures/clustering")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-def plot_pca_variance_and_loadings(pca_full, pca, n_points: int = 50, filename: str = "01_pca_variance_loadings.png"):
+def plot_pca_variance_and_loadings(pca_full: PCA, pca: PCA, n_points: int = 50, filename: str = "01_pca_variance_loadings.png") -> None:
+    """Plots the cumulative explained variance and the feature loadings for the principal components."""
     fig, (ax_var, ax_load) = plt.subplots(1, 2, figsize=(16, 6))
     
+    # Cumulative Variance Plot
     max_comps = min(10, len(pca_full.explained_variance_ratio_))
     cum_var = np.cumsum(pca_full.explained_variance_ratio_)[:max_comps + 1]
     
@@ -43,6 +45,7 @@ def plot_pca_variance_and_loadings(pca_full, pca, n_points: int = 50, filename: 
     ax_var.grid(True, linestyle='--', alpha=0.5)
     ax_var.legend(fontsize=12)
 
+    # PCA Loadings Plot
     v_norm = np.linspace(0, 1, n_points)
     cmap_loadings = plt.cm.tab10
     
@@ -61,10 +64,11 @@ def plot_pca_variance_and_loadings(pca_full, pca, n_points: int = 50, filename: 
     plt.tight_layout()
     output_path = OUTPUT_DIR / filename
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Plot saved: {output_path}")
+    logger.info(f"Plot saved: {output_path.name}")
     plt.close()
 
-def plot_cluster_evaluation(cluster_range: list, inertia: list, silhouette: list, n_clusters: int, filename: str = "02_cluster_evaluation.png"):
+def plot_cluster_evaluation(cluster_range: list, inertia: list, silhouette: list, n_clusters: int, filename: str = "02_cluster_evaluation.png") -> None:
+    """Plots the K-selection metrics (Inertia vs. Silhouette) to visualize optimal topological clustering."""
     fig, ax_metrics = plt.subplots(figsize=(10, 6))
     
     color_wcss = 'tab:blue'
@@ -92,10 +96,11 @@ def plot_cluster_evaluation(cluster_range: list, inertia: list, silhouette: list
     plt.tight_layout()
     output_path = OUTPUT_DIR / filename
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Plot saved: {output_path}")
+    logger.info(f"Plot saved: {output_path.name}")
     plt.close()
 
-def plot_cluster_median_curves(X_real: np.ndarray, labels: np.ndarray, n_clusters: int, n_points: int = 50, filename: str = "03_cluster_median_curves.png"):
+def plot_cluster_median_curves(X_real: np.ndarray, labels: np.ndarray, n_clusters: int, n_points: int = 50, filename: str = "03_cluster_median_curves.png") -> None:
+    """Renders the physical thermodynamic fingerprint (median & IQR) for each identified morphological cluster."""
     cols = min(n_clusters, 3)
     rows = math.ceil(n_clusters / cols)
     fig, axes = plt.subplots(rows, cols, figsize=(16, 5 * rows), dpi=150)
@@ -114,9 +119,11 @@ def plot_cluster_median_curves(X_real: np.ndarray, labels: np.ndarray, n_cluster
         p25_c = np.percentile(X_real[mask], 25, axis=0)
         p75_c = np.percentile(X_real[mask], 75, axis=0)
 
+        # Reverse sweep
         ax.plot(v_norm, median_c[:n_points], color=colors[i], linewidth=3.5)
         ax.fill_between(v_norm, p25_c[:n_points], p75_c[:n_points], color=colors[i], alpha=0.25)
         
+        # Forward sweep
         ax.plot(v_norm, median_c[n_points:], linestyle='--', color=colors[i], linewidth=3.5, alpha=0.9)
         ax.fill_between(v_norm, p25_c[n_points:], p75_c[n_points:], color=colors[i], alpha=0.15)
 
@@ -131,10 +138,14 @@ def plot_cluster_median_curves(X_real: np.ndarray, labels: np.ndarray, n_cluster
     plt.tight_layout()
     output_path = OUTPUT_DIR / filename
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Plot saved: {output_path}")
+    logger.info(f"Plot saved: {output_path.name}")
     plt.close()
 
-def plot_comparison_heatmaps(jv_labeled: pd.DataFrame, n_clusters: int, filename: str = "04_comparison_heatmaps.png"):
+def plot_comparison_heatmaps(jv_labeled: pd.DataFrame, n_clusters: int, filename: str = "04_comparison_heatmaps.png") -> None:
+    """
+    Generates temporal heatmaps mapping the dominant daily/hourly topological states for each device.
+    Employs discrete colormapping and rapid vectorized mode aggregation to prevent memory crashes.
+    """
     df_curves = jv_labeled[['id_curve', 'cell_id', 'cell_name', 'Timestamp', 'label_curve']].drop_duplicates(subset=['id_curve']).copy()
     unique_cells = df_curves[['cell_id', 'cell_name']].drop_duplicates().sort_values('cell_id')
     
@@ -146,7 +157,13 @@ def plot_comparison_heatmaps(jv_labeled: pd.DataFrame, n_clusters: int, filename
     fig, axes = plt.subplots(rows, cols, figsize=(8 * cols, 7 * rows), dpi=150)
     plt.subplots_adjust(hspace=0.4)
     axes_flat = np.array(axes).flatten() if len(unique_cells) > 1 else [axes]
-    cmap = plt.cm.viridis
+    
+    # 1. Discrete Colormap Mapping: Neutral Gray for Anomalies (-1), Viridis for Physical States
+    color_denominator = max(n_clusters - 1, 1)
+    color_list = ['#808080'] + [plt.cm.viridis(i / color_denominator) for i in range(n_clusters)]
+    cmap_discrete = mcolors.ListedColormap(color_list)
+    bounds = np.arange(-1.5, n_clusters + 0.5, 1)
+    norm = mcolors.BoundaryNorm(bounds, cmap_discrete.N)
 
     for i, (_, row) in enumerate(unique_cells.iterrows()):
         ax = axes_flat[i]
@@ -154,10 +171,12 @@ def plot_comparison_heatmaps(jv_labeled: pd.DataFrame, n_clusters: int, filename
         df['date'] = pd.to_datetime(df['Timestamp']).dt.date
         df['hour'] = pd.to_datetime(df['Timestamp']).dt.hour
         
-        heatmap_data = df.pivot_table(index='date', columns='hour', values='label_curve',
-                                      aggfunc=lambda x: x.mode().iloc[0] if not x.empty else None)
+        # 2. Ultra-fast vectorized aggregation for mode extraction (Solves OOM Lambda bottleneck)
+        df_mode = df.groupby(['date', 'hour', 'label_curve']).size().reset_index(name='count')
+        df_mode = df_mode.sort_values('count', ascending=False).drop_duplicates(['date', 'hour'])
+        heatmap_data = df_mode.pivot(index='date', columns='hour', values='label_curve')
         
-        sns.heatmap(heatmap_data, cmap=cmap, ax=ax, cbar=False, vmin=0, vmax=n_clusters-1)
+        sns.heatmap(heatmap_data, cmap=cmap_discrete, norm=norm, ax=ax, cbar=False)
         ax.set_title(f"Device: {row['cell_name']}", fontweight='bold')
         ax.set_xlabel("Hour of Day")
         ax.set_ylabel("Date")
@@ -167,15 +186,24 @@ def plot_comparison_heatmaps(jv_labeled: pd.DataFrame, n_clusters: int, filename
         
     output_path = OUTPUT_DIR / filename
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Plot saved: {output_path}")
+    logger.info(f"Plot saved: {output_path.name}")
     plt.close()
 
-def plot_3d_pca_interactive(jv_labeled: pd.DataFrame, curves_normalized: pd.Series, n_clusters: int = 4, filename: str = "05_pca_3d_interactive.html"):
+def plot_3d_pca_interactive(
+    jv_labeled: pd.DataFrame,
+    curves_normalized: pd.Series,
+    pca_model: PCA,
+    n_clusters: int,
+    filename: str = "05_pca_3d_interactive.html"
+) -> None:
+    """Generates an interactive 3D scatter plot of the PCA projection mapped to morphological clusters."""
     df_labels = jv_labeled[['cell_id', 'curve', 'label_curve']].drop_duplicates()
     X = np.stack(curves_normalized.tolist())
-    
-    pca = PCA(n_components=3).fit(X)
-    X_pca = pca.transform(X)
+
+    if pca_model.n_components_ < 3:
+        raise ValueError("The trained PCA model must contain at least 3 components for a 3D plot.")
+
+    X_pca = pca_model.transform(X)[:, :3]
     
     df_pca = curves_normalized.index.to_frame(index=False)
     df_pca[['PC1', 'PC2', 'PC3']] = X_pca
@@ -185,15 +213,18 @@ def plot_3d_pca_interactive(jv_labeled: pd.DataFrame, curves_normalized: pd.Seri
     colors = plt.cm.viridis(np.linspace(0, 1, n_clusters))
     color_map = {str(i): f'rgba({int(c[0]*255)}, {int(c[1]*255)}, {int(c[2]*255)}, {c[3]})' 
                  for i, c in enumerate(colors)}
+    
+    # 3. Explicit assignment for pruned/rejected anomalous curves in 3D space
+    color_map['-1'] = 'rgba(128, 128, 128, 0.15)' 
                  
     fig = px.scatter_3d(df_3d, x='PC1', y='PC2', z='PC3', color='Cluster',
                         color_discrete_map=color_map, opacity=0.75,
-                        title=f"3D PCA Map ({np.sum(pca.explained_variance_ratio_)*100:.1f}% Total Variance)")
+                        title=f"3D PCA Morphological Space ({np.sum(pca_model.explained_variance_ratio_[:3])*100:.1f}% Total Variance)")
     fig.update_traces(marker=dict(size=3.5))
     
     output_path = OUTPUT_DIR / filename
     fig.write_html(output_path, include_plotlyjs=True)
-    logger.info(f"Interactive 3D plot saved: {output_path}")
+    logger.info(f"Interactive 3D plot saved: {output_path.name}")
 
 if __name__ == "__main__":
     CLUSTERED_DIR = Path("data/clustered/outdoor")
@@ -202,17 +233,17 @@ if __name__ == "__main__":
     joblib_path = ARTIFACTS_DIR / "clustering_artifacts.joblib"
     
     if not (parquet_path.exists() and joblib_path.exists()):
-        logger.error("Required data or artifacts missing. Ensure src/clustering.py was run.")
+        logger.error("Required datasets or artifacts missing. Ensure src/clustering.py executed successfully.")
         exit(1)
 
-    logger.info("Loading pre-trained dataset and models...")
+    logger.info("Loading pre-trained dataset topology and models...")
     jv_labeled = pd.read_parquet(parquet_path)
     artifacts = joblib.load(joblib_path)
     
     N_POINTS = 50
     NUM_CLUSTERS = artifacts["n_clusters"]
     
-    logger.info("Generating Machine Learning Visualizations...")
+    logger.info("Generating Machine Learning diagnostic visualizations...")
     
     plot_pca_variance_and_loadings(
         pca_full=artifacts["pca_full_model"], 
@@ -242,7 +273,8 @@ if __name__ == "__main__":
     plot_3d_pca_interactive(
         jv_labeled=jv_labeled, 
         curves_normalized=artifacts["curves_normalized"], 
+        pca_model=artifacts["pca_model"],
         n_clusters=NUM_CLUSTERS
     )
     
-    logger.info("All clustering visualizations generated successfully!")
+    logger.info("All unsupervised clustering visualizations generated successfully!")
