@@ -15,6 +15,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from src.config import OPERATIONAL_HOUR_END, OPERATIONAL_HOUR_START
+
 # Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -98,7 +100,12 @@ if __name__ == "__main__":
                 df['curve'] = is_reverse_start.cumsum()
                 
                 # Filter to daylight operational hours
-                df = df[df['Timestamp'].dt.hour.between(6, 22)]
+                df = df[
+                    df['Timestamp'].dt.hour.between(
+                        OPERATIONAL_HOUR_START,
+                        OPERATIONAL_HOUR_END,
+                    )
+                ]
                 
                 # EARLY AGGREGATION: Reduces millions of rows to ~1000 per device, preventing OOM
                 spans = df.groupby('curve')['Voltage_V'].agg(lambda x: x.max() - x.min()) * 1000

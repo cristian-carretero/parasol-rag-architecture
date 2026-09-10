@@ -8,7 +8,10 @@ and aligns continuous telemetry using strict causal backward merging.
 import logging
 from pathlib import Path
 
+import numpy as np   
 import pandas as pd
+
+from src.config import TELEMETRY_MERGE_TOLERANCE
 
 # Professional MLOps logging configuration
 logging.basicConfig(
@@ -16,9 +19,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("SurvivalDataset")
-
-# Tolerance for backward merge to prevent stale telemetry propagation across sensor gaps
-MERGE_ASOF_TOLERANCE = pd.Timedelta("20min")
 
 def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output_path: Path) -> pd.DataFrame:
     """
@@ -75,7 +75,7 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
         
         cols_to_keep = ['Timestamp']
         global_features = ['POA_Irradiance_W_m2', 'AbsoluteHumidity_g_m3']
-                           
+                            
         for feat in global_features:
             if feat in df_agg.columns:
                 cols_to_keep.append(feat)
@@ -104,7 +104,7 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
         # Calculate physical memory from the birth of this cell only.
         dt_seconds = df_subset['Timestamp'].diff().dt.total_seconds()
         dt_hours = (
-            dt_seconds.mask(dt_seconds > MERGE_ASOF_TOLERANCE.total_seconds(), 0)
+            dt_seconds.mask(dt_seconds > TELEMETRY_MERGE_TOLERANCE.total_seconds(), 0)
             .fillna(600)
             / 3600.0
         )
@@ -133,14 +133,14 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
             df_subset,
             on='Timestamp',
             direction='backward',
-            tolerance=MERGE_ASOF_TOLERANCE
+            tolerance=TELEMETRY_MERGE_TOLERANCE
         )
 
         # Audit data gaps (missing matches within tolerance)
         if pce_col in cell_merged.columns:
             n_gaps = cell_merged[pce_col].isna().sum()
             if n_gaps > 0:
-                logger.warning(f"[{cell}] {n_gaps} J-V sweeps lack telemetry within {MERGE_ASOF_TOLERANCE} tolerance (Sensor gap).")
+                logger.warning(f"[{cell}] {n_gaps} J-V sweeps lack telemetry within {TELEMETRY_MERGE_TOLERANCE} tolerance (Sensor gap).")
         
         # Standardize features for XGBoost compatibility
         rename_dict = {}
@@ -160,6 +160,17 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
         
         # Drop rows missing critical physics parameters
         df_survival = df_survival.dropna(subset=['POA_Irradiance_W_m2', 'PCE'])
+
+        # --- AÑADIDO: INYECCIÓN DE FEATURES CÍCLICAS (DIARIAS Y ESTACIONALES) ---
+        logger.info("Encoding cyclic temporal features (Hour and Day of Year)...")
+        hour_fraction = df_survival['Timestamp'].dt.hour + df_survival['Timestamp'].dt.minute / 60.0
+        df_survival['Hour_Sin'] = np.sin(2 * np.pi * hour_fraction / 24.0)
+        df_survival['Hour_Cos'] = np.cos(2 * np.pi * hour_fraction / 24.0)
+
+        day_of_year = df_survival['Timestamp'].dt.dayofyear
+        df_survival['Day_Sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
+        df_survival['Day_Cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
+        # -----------------------------------------------------------------------
         
         logger.info(f"Dataset successfully assembled: {len(df_survival)} J-V events linked with telemetry.")
         
@@ -192,7 +203,7 @@ if __name__ == "__main__":
         
         if not df_final.empty:
             print("\nPreview of the instantaneous and cumulative integrated data:")
-            preview_cols = ['cell_name', 'Timestamp', 'POA_Irradiance_W_m2', 'PCE', 'Cum_Light_Dose_Wh_m2']
+            preview_cols = ['cell_name', 'Timestamp', 'POA_Irradiance_W_m2', 'PCE', 'Hour_Sin', 'Hour_Cos', 'Day_Sin', 'Day_Cos']
             print(df_final[preview_cols].head())
     else:
         logger.error(f"Missing required input datasets. Check paths:\n- {jv_labeled_file}\n- {AGGREGATED_FILE}")

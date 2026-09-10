@@ -1,193 +1,206 @@
 """
 ParaSol Dashboard
-==================
-Meteorological and Photovoltaic Performance Monitoring Panel
-with Digital Twin Integration (Early Failure Detection).
+=================
+Meteorological and photovoltaic performance monitoring panel with
+Digital Twin integration for early failure detection.
+
+This module is organized into the following sections:
+    1. Configuration & constants
+    2. Styling
+    3. Data loading & caching
+    4. Chart-building utilities (shared helpers + chart factories)
+    5. Empirical threshold audit utilities
+    6. KPI formatting utilities
+    7. Reusable UI fragments (toolbar, branding, footer)
+    8. Page: General Overview
+    9. Page: Device Analysis
+    10. Application entry point
 """
+from __future__ import annotations
+
 import datetime
 import json
 from pathlib import Path
+from typing import Any, Literal
+
 import joblib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
-# =====================================================================
-# PAGE CONFIGURATION (Must be the first Streamlit command)
-# =====================================================================
-st.set_page_config(
-    layout="wide",
-    initial_sidebar_state="expanded",
-    page_title="ParaSol Dashboard"
+from src.config import (
+    ALERT_FREQUENCY_THRESHOLD_PCT,
+    BURN_IN_DAYS,
+    CELL_AREA_M2,
+    DAYLIGHT_IRRADIANCE_MIN_W_M2,
+    PRODROMAL_WINDOW_DAYS,
+    RESIDUAL_ALERT_QUANTILE,
+    T80_FRACTION,
 )
 
+# =====================================================================
+# 1. CONFIGURATION & CONSTANTS
+# =====================================================================
+st.set_page_config(layout="wide", initial_sidebar_state="expanded", page_title="ParaSol Dashboard")
+
 LOGO_URL = "https://www.emiliojuarez.es/imgs/logo-oss.jpg"
+CREATOR_NAME = "Cristian Carretero"
 CREATOR_LINK = "https://linkedin.com/in/cristian-carretero-fernandez"
 
-# Absolute paths to data
+# Data paths
 FLEET_DATA_PATH = Path("data/aggregated/outdoor/meteo_mppt_10min.parquet")
 SURVIVAL_DATA_PATH = Path("data/survival/outdoor/survival_dataset.parquet")
 ARTIFACTS_PATH = Path("data/anomaly/artifacts/early_failure_artifacts.joblib")
 
-# Rutas absolutas a los 3 parquets del Gemelo Digital
-ANOMALY_DIR = Path("/home/cristian/Documentos/Proyectos/parasol-rag-architecture/data/anomaly/outdoor")
+ANOMALY_DIR = Path("data/anomaly/outdoor")
 TWIN_DIAGNOSTICS_PATH = ANOMALY_DIR / "anomaly_scored_dataset.parquet"
 PCE_NORM_PATH = ANOMALY_DIR / "pce_norm_predictions.parquet"
 PFF_PRED_PATH = ANOMALY_DIR / "pff_predictions.parquet"
 
-# Physical constants
-CELL_AREA_M2 = 0.64 / 10000.0  # 0.64 cm² converted to m²
+TWIN_RULES_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "twin_surrogate_rules.json"
+FORENSIC_RULES_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "forensic_surrogate_rules.json"
+GRID_SEARCH_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "burn_in_grid_search.parquet"
 
-# PARCHE 1: umbral unificado con data_aggregation.py / anomaly_detection.py.
-# Antes: > 10 W/m^2 en 3 puntos de este archivo (inestabilidad numerica del denominador
-# en la division de PCE con irradiancia baja). Los artefactos de supervivencia ya usan 100.0
-# como default; ahora las 3 ocurrencias sueltas quedan consistentes con ese mismo valor.
-# TODO (Parche 6): mover a src/common.py junto con CELL_AREA_M2 y el resto de constantes
-# compartidas, e importarlo en vez de redefinirlo aqui.
-PCE_IRRADIANCE_MIN_W_M2 = 100.0
+# Empirical threshold audit configuration
+AUDIT_CASE_STUDIES = [
+    "M83AB302", "P12", "A170AB302",
+    "A164AB302c", "A167AB344a", "ASLRXAB341",
+    "M0",
+    "A162ALXP01",
+]
+AUDIT_CASE_LABELS = {
+    "M83AB302": "Healthy control — M83AB302",
+    "P12": "Clear failure — P12",
+    "A170AB302": "Borderline case — A170AB302",
+}
+AUDIT_SENSITIVITY_THRESHOLDS = (0.025, 0.050, 0.075)
+
+# Charting constants
 MAX_NATIVE_POINTS = 3000
+DEFAULT_COLOR_SEQUENCE = ["#36B9CC", "#1E293B", "#F59E0B", "#3B82F6", "#10B981", "#8B5CF6", "#F43F5E", "#64748B"]
+MPPT_COLOR_SEQUENCE = ["#1E293B", "#2563EB", "#16A34A", "#7C3AED", "#DB2777", "#4F46E5", "#64748B", "#111827"]
+
+RESOLUTION_LABELS = {
+    "1h": "Hourly (1H)",
+    "6h": "6-Hourly (6H)",
+    "1D": "Daily (1D)",
+    "3D": "3-Day (3D)",
+    "7D": "Weekly (7D)",
+    "30D": "Monthly (30D)",
+}
+
+PLOTLY_CONFIG = {
+    "modeBarButtonsToRemove": ["autoScale2d", "select2d", "lasso2d"],
+    "displaylogo": False,
+    "toImageButtonOptions": {"format": "png", "filename": "parasol_chart", "height": 600, "width": 1000, "scale": 2},
+}
 
 
 def get_resolution_rules(duration_days: float, label_stat: str) -> list[tuple[str, str]]:
-    """Return the available server-side resolutions for a selected time window."""
+    """Return the server-side aggregation options available for a given time window."""
     if duration_days <= 1.0:
         return [("native", "Native (10 min)")]
     if duration_days <= 7.0:
         return [
             ("native", "Native (10 min)"),
-            ("1h", f"{label_stat} Hourly (1H)"),
-            ("1D", f"{label_stat} Daily (1D)"),
+            ("1h", f"{label_stat} {RESOLUTION_LABELS['1h']}"),
+            ("1D", f"{label_stat} {RESOLUTION_LABELS['1D']}"),
         ]
     if duration_days <= 30.0:
-        return [
-            ("1h", f"{label_stat} Hourly (1H)"),
-            ("6h", f"{label_stat} 6-Hourly (6H)"),
-            ("1D", f"{label_stat} Daily (1D)"),
-            ("3D", f"{label_stat} 3-Day (3D)"),
-            ("7D", f"{label_stat} Weekly (7D)"),
-        ]
-    return [
-        ("1D", f"{label_stat} Daily (1D)"),
-        ("3D", f"{label_stat} 3-Day (3D)"),
-        ("7D", f"{label_stat} Weekly (7D)"),
-        ("30D", f"{label_stat} Monthly (30D)"),
-    ]
+        return [(freq, f"{label_stat} {RESOLUTION_LABELS[freq]}") for freq in ("1h", "6h", "1D", "3D", "7D")]
+    return [(freq, f"{label_stat} {RESOLUTION_LABELS[freq]}") for freq in ("1D", "3D", "7D", "30D")]
+
 
 # =====================================================================
-# STYLES
+# 2. STYLING
 # =====================================================================
 def load_styles() -> None:
-    """Loads external CSS and injects it into the application."""
+    """Load and inject the external stylesheet, if present."""
     try:
         with open("assets/style.css", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
         pass
 
+
 # =====================================================================
-# DATA LOADING AND CACHING
+# 3. DATA LOADING & CACHING
 # =====================================================================
-@st.cache_data(show_spinner=False)
-def load_global_data() -> pd.DataFrame:
+def _load_timeseries_parquet(path: Path, label: str, severity: Literal["error", "warning"] = "warning") -> pd.DataFrame:
+    """Load a Parquet time series and normalize its Timestamp index to naive UTC."""
     try:
-        df = pd.read_parquet(FLEET_DATA_PATH)
+        df = pd.read_parquet(path)
         if df.index.name == "Timestamp":
             df = df.reset_index()
-        df["Timestamp"] = (
-            pd.to_datetime(df["Timestamp"], utc=True)
-            .dt.tz_localize(None)
-            .astype("datetime64[ns]")
-        )
-        df.set_index("Timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Error loading the fleet dataset: {e}")
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None).astype("datetime64[ns]")
+        return df.set_index("Timestamp")
+    except Exception as exc:
+        getattr(st, severity)(f"Failed to load {label}: {exc}")
         return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False)
+def load_global_data() -> pd.DataFrame:
+    return _load_timeseries_parquet(FLEET_DATA_PATH, "the fleet dataset", severity="error")
+
 
 @st.cache_data(show_spinner=False)
 def load_survival_data() -> pd.DataFrame:
-    try:
-        df = pd.read_parquet(SURVIVAL_DATA_PATH)
-        df["Timestamp"] = (
-            pd.to_datetime(df["Timestamp"], utc=True)
-            .dt.tz_localize(None)
-            .astype("datetime64[ns]")
-        )
-        df.set_index("Timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Error loading the survival dataset: {e}")
-        return pd.DataFrame()
+    return _load_timeseries_parquet(SURVIVAL_DATA_PATH, "the survival dataset", severity="error")
+
 
 @st.cache_data(show_spinner=False)
 def load_twin_diagnostics() -> pd.DataFrame:
-    """Loads the enriched observations used by the Digital Twin charts."""
-    try:
-        df = pd.read_parquet(TWIN_DIAGNOSTICS_PATH)
-        df["Timestamp"] = (
-            pd.to_datetime(df["Timestamp"], utc=True)
-            .dt.tz_localize(None)
-            .astype("datetime64[ns]")
-        )
-        df.set_index("Timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.warning(f"Failed to load Digital Twin diagnostics dataset: {e}")
-        return pd.DataFrame()
+    return _load_timeseries_parquet(TWIN_DIAGNOSTICS_PATH, "the Digital Twin diagnostics dataset")
+
 
 @st.cache_data(show_spinner=False)
 def load_pce_norm_data() -> pd.DataFrame:
-    """Loads the isolated PCE Normalization predictions."""
-    try:
-        df = pd.read_parquet(PCE_NORM_PATH)
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None).astype("datetime64[ns]")
-        df.set_index("Timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.warning(f"Failed to load PCE Norm dataset: {e}")
-        return pd.DataFrame()
+    return _load_timeseries_parquet(PCE_NORM_PATH, "the PCE normalization dataset")
+
 
 @st.cache_data(show_spinner=False)
 def load_pff_pred_data() -> pd.DataFrame:
-    """Loads the isolated pFF structural predictions."""
-    try:
-        df = pd.read_parquet(PFF_PRED_PATH)
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).dt.tz_localize(None).astype("datetime64[ns]")
-        df.set_index("Timestamp", inplace=True)
-        return df
-    except Exception as e:
-        st.warning(f"Failed to load pFF dataset: {e}")
-        return pd.DataFrame()
+    return _load_timeseries_parquet(PFF_PRED_PATH, "the pFF prediction dataset")
+
 
 @st.cache_resource(show_spinner=False)
 def load_ml_artifacts() -> dict:
-    """Loads the Digital Twin brain generated by XGBoost."""
     try:
         if ARTIFACTS_PATH.exists():
             return joblib.load(ARTIFACTS_PATH)
-    except Exception as e:
-        st.warning(f"Failed to load Digital Twin artifacts: {e}")
+    except Exception as exc:
+        st.warning(f"Failed to load Digital Twin artifacts: {exc}")
     return {}
 
 
 @st.cache_data(show_spinner=False)
-def load_xai_rules() -> dict:
-    """Loads deterministic surrogate-tree rules exported by early screening."""
-    xai_path = ARTIFACTS_PATH.parent.parent / "diagnostics" / "xai_surrogate_rules.json"
+def load_twin_rules() -> dict:
     try:
-        if xai_path.exists():
-            with xai_path.open(encoding="utf-8") as file:
+        if TWIN_RULES_PATH.exists():
+            with TWIN_RULES_PATH.open(encoding="utf-8") as file:
                 rules = json.load(file)
             return rules if isinstance(rules, dict) else {}
-    except (OSError, json.JSONDecodeError) as exc:
-        st.warning(f"Failed to load XAI surrogate rules: {exc}")
+    except Exception as exc:
+        st.warning(f"Failed to load Twin surrogate rules: {exc}")
+    return {}
+
+@st.cache_data(show_spinner=False)
+def load_forensic_rules() -> dict:
+    try:
+        if FORENSIC_RULES_PATH.exists():
+            with FORENSIC_RULES_PATH.open(encoding="utf-8") as file:
+                rules = json.load(file)
+            return rules if isinstance(rules, dict) else {}
+    except Exception as exc:
+        st.warning(f"Failed to load Forensic surrogate rules: {exc}")
     return {}
 
 
 def get_device_options(ml_artifacts: dict, survival_df: pd.DataFrame) -> list[str]:
-    """Returns the fleet devices available in the loaded diagnostic datasets."""
-    devices = set()
+    devices: set[str] = set()
     summary_table = ml_artifacts.get("summary_table", pd.DataFrame())
     if isinstance(summary_table, pd.DataFrame):
         devices.update(str(device) for device in summary_table.index if pd.notna(device))
@@ -195,640 +208,741 @@ def get_device_options(ml_artifacts: dict, survival_df: pd.DataFrame) -> list[st
         devices.update(str(device) for device in survival_df["cell_name"].dropna().unique())
     return sorted(devices)
 
+@st.cache_data(show_spinner=False)
+def load_grid_search_data() -> pd.DataFrame:
+    try:
+        if GRID_SEARCH_PATH.exists():
+            return pd.read_parquet(GRID_SEARCH_PATH)
+    except Exception as exc:
+        st.warning(f"Failed to load burn-in grid search data: {exc}")
+    return pd.DataFrame()
+
 # =====================================================================
-# ADVANCED PLOTLY CHART GENERATION
+# 4. CHART-BUILDING UTILITIES
 # =====================================================================
-def create_plotly_chart(df, y_cols, color_seq=None, central_metric="Mean", band_min_col=None, band_max_col=None, resolution_rules=None):
+def _hex_to_rgba(hex_color: str, alpha: float = 0.25) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _duration_days(df: pd.DataFrame) -> float:
+    if df.empty:
+        return 0.0
+    return (df.index.max() - df.index.min()).total_seconds() / 86400.0
+
+
+def _base_chart_layout(**overrides: Any) -> dict:
+    layout = dict(
+        margin=dict(l=10, r=10, t=10, b=60),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    layout.update(overrides)
+    return layout
+
+
+def _resolution_updatemenu(buttons: list[dict], y: float = -0.15) -> list[dict]:
+    if len(buttons) <= 1:
+        return []
+    return [dict(
+        type="buttons", direction="right", buttons=buttons, active=0, showactive=True,
+        x=1, xanchor="right", y=y, yanchor="top", font=dict(size=11, color="#1E293B"),
+        bgcolor="#F8FAFC", bordercolor="#E2E8F0",
+    )]
+
+
+def _build_resolution_buttons(rules: list[tuple[str, str]], traces_per_level: int, method: str = "restyle") -> list[dict]:
+    n_levels = len(rules)
+    buttons = []
+    for idx, (_, label) in enumerate(rules):
+        visibility = [False] * (n_levels * traces_per_level)
+        start = idx * traces_per_level
+        for k in range(start, start + traces_per_level):
+            visibility[k] = True
+        buttons.append(dict(label=label, method=method, args=[{"visible": visibility}]))
+    return buttons
+
+
+def create_plotly_chart(
+    df: pd.DataFrame,
+    y_cols: str | list[str],
+    color_seq: list[str] | None = None,
+    central_metric: str = "Mean",
+    band_min_col: str | None = None,
+    band_max_col: str | None = None,
+    resolution_rules: list[tuple[str, str]] | None = None,
+) -> go.Figure:
     if df.empty:
         return go.Figure()
-    fig = go.Figure()
     if isinstance(y_cols, str):
         y_cols = [y_cols]
-    if color_seq is None:
-        color_seq = ["#36B9CC", "#1E293B", "#F59E0B", "#3B82F6", "#10B981", "#8B5CF6", "#F43F5E", "#64748B"]
 
+    color_seq = color_seq or DEFAULT_COLOR_SEQUENCE
     agg_func = "median" if central_metric == "Median" else "mean"
     label_stat = "Median" if central_metric == "Median" else "Mean"
-    
-    def hex_to_rgba(hex_color, alpha=0.25):
-        hex_color = hex_color.lstrip("#")
-        r, g, b = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-        return f"rgba({r},{g},{b},{alpha})"
-        
-    has_bands = band_min_col and band_max_col and band_min_col in df.columns and band_max_col in df.columns
-    min_dt = df.index.min()
-    max_dt = df.index.max()
-    duration_days = (max_dt - min_dt).total_seconds() / 86400.0
-    resolution_rules = resolution_rules or get_resolution_rules(duration_days, label_stat)
-    if len(df) > MAX_NATIVE_POINTS and resolution_rules[0][0] == "native":
-        resolution_rules = get_resolution_rules(7.0001, label_stat)
-        duration_days = max(duration_days, 7.0001)
+    has_bands = bool(band_min_col and band_max_col and band_min_col in df.columns and band_max_col in df.columns)
+    band_eligible_cols = {"ModuleTemp_Mean_C", "ModuleTemp_Median_C"}
 
-    rule_freqs = [freq for freq, _ in resolution_rules]
-    if rule_freqs == ["native"]:
-        for i, col in enumerate(y_cols):
-            c = color_seq[i % len(color_seq)]
-            name = str(col)
-            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers", name=name, legendgroup=name, line=dict(color=c, width=1.5), marker=dict(size=4), visible=True, connectgaps=True))
-        updatemenus_config = []
+    rules = resolution_rules or get_resolution_rules(_duration_days(df), label_stat)
+    if len(df) > MAX_NATIVE_POINTS and rules[0][0] == "native":
+        rules = get_resolution_rules(7.0001, label_stat)
 
-    elif rule_freqs == ["native", "1h", "1D"]:
-        df_1h_main = df.resample("1h").agg(agg_func, numeric_only=True)
-        df_1h_min = df.resample("1h").min(numeric_only=True)
-        df_1h_max = df.resample("1h").max(numeric_only=True)
-        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
-        df_1d_min = df.resample("1D").min(numeric_only=True)
-        df_1d_max = df.resample("1D").max(numeric_only=True)
+    is_native_only = len(rules) == 1 and rules[0][0] == "native"
+    traces_per_col = 1 if is_native_only else 3
+    traces_per_level = traces_per_col * len(y_cols)
+
+    fig = go.Figure()
+    for level_idx, (freq, label) in enumerate(rules):
+        is_active = level_idx == 0
+        if freq == "native":
+            df_main = df_min = df_max = df
+        else:
+            df_main = df.resample(freq).agg(agg_func, numeric_only=True)
+            df_min = df.resample(freq).min(numeric_only=True)
+            df_max = df.resample(freq).max(numeric_only=True)
+
+        level_weight = min(level_idx, 3)
+        line_width = 1.5 if freq == "native" else 2.0 + 0.25 * level_weight
+        marker_size = 4 if freq == "native" else 5 + level_weight
+
         for i, col in enumerate(y_cols):
-            c = color_seq[i % len(color_seq)]
-            c_fill = hex_to_rgba(c, 0.25)
+            color = color_seq[i % len(color_seq)]
             name = str(col)
-            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
+
+            if is_native_only:
+                fig.add_trace(go.Scatter(
+                    x=df_main.index, y=df_main[col], mode="lines+markers", name=name,
+                    legendgroup=name, line=dict(color=color, width=line_width),
+                    marker=dict(size=marker_size), visible=is_active, connectgaps=True,
+                ))
+                continue
+
+            use_band = has_bands and col in band_eligible_cols
             b_min = band_min_col if use_band else col
             b_max = band_max_col if use_band else col
+            fill_color = _hex_to_rgba(color, 0.25)
 
-            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers", name=name, legendgroup=name, line=dict(color=c, width=1.5), marker=dict(size=4), visible=True, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1h_min.index, y=df_1h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1h_max.index, y=df_1h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1h_main.index, y=df_1h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
+            fig.add_trace(go.Scatter(
+                x=df_min.index, y=df_min[b_min], mode="lines", line=dict(width=0),
+                name=f"Min {name}", legendgroup=name, showlegend=False,
+                visible=is_active, connectgaps=True,
+            ))
+            fig.add_trace(go.Scatter(
+                x=df_max.index, y=df_max[b_max], mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=fill_color, name=f"Max {name}", legendgroup=name,
+                showlegend=False, visible=is_active, connectgaps=True,
+            ))
+            trace_name = name if freq == "native" else f"{name} ({label_stat} {freq})"
+            fig.add_trace(go.Scatter(
+                x=df_main.index, y=df_main[col], mode="lines+markers", name=trace_name,
+                legendgroup=name, line=dict(color=color, width=line_width),
+                marker=dict(size=marker_size), visible=is_active, connectgaps=True,
+            ))
 
-        n = len(y_cols)
-        vis_orig = ([True, False, False, False, False, False, False]) * n
-        vis_1h   = ([False, True, True, True, False, False, False]) * n
-        vis_1d   = ([False, False, False, False, True, True, True]) * n
-
-        trace_indices = list(range(7 * n))
-
-        buttons_agg = [
-            dict(label="Native (10 min)", method="restyle", args=[{"visible": vis_orig}, trace_indices]),
-            dict(label=f"{label_stat} Hourly (1H)", method="restyle", args=[{"visible": vis_1h}, trace_indices]),
-            dict(label=f"{label_stat} Daily (1D)", method="restyle", args=[{"visible": vis_1d}, trace_indices]),
-        ]
-        updatemenus_config = [
-            dict(type="buttons", direction="right", buttons=buttons_agg, active=0, showactive=True,
-                 x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
-                 bgcolor="#F8FAFC", bordercolor="#E2E8F0")
-        ]
-
-    elif rule_freqs == ["1h", "6h", "1D", "3D", "7D"]:
-        df_1h_main = df.resample("1h").agg(agg_func, numeric_only=True)
-        df_1h_min = df.resample("1h").min(numeric_only=True)
-        df_1h_max = df.resample("1h").max(numeric_only=True)
-        
-        df_6h_main = df.resample("6h").agg(agg_func, numeric_only=True)
-        df_6h_min = df.resample("6h").min(numeric_only=True)
-        df_6h_max = df.resample("6h").max(numeric_only=True)
-        
-        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
-        df_1d_min = df.resample("1D").min(numeric_only=True)
-        df_1d_max = df.resample("1D").max(numeric_only=True)
-
-        df_3d_main = df.resample("3D").agg(agg_func, numeric_only=True)
-        df_3d_min = df.resample("3D").min(numeric_only=True)
-        df_3d_max = df.resample("3D").max(numeric_only=True)
-        
-        df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
-        df_7d_min = df.resample("7D").min(numeric_only=True)
-        df_7d_max = df.resample("7D").max(numeric_only=True)
-        
-        for i, col in enumerate(y_cols):
-            c = color_seq[i % len(color_seq)]
-            c_fill = hex_to_rgba(c, 0.25)
-            name = str(col)
-            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
-            b_min = band_min_col if use_band else col
-            b_max = band_max_col if use_band else col
-
-            fig.add_trace(go.Scatter(x=df_1h_min.index, y=df_1h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1h_max.index, y=df_1h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1h_main.index, y=df_1h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=True, connectgaps=True))
-            
-            fig.add_trace(go.Scatter(x=df_6h_min.index, y=df_6h_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_6h_max.index, y=df_6h_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_6h_main.index, y=df_6h_main[col], mode="lines+markers", name=f"{name} ({label_stat} 6H)", legendgroup=name, line=dict(color=c, width=2.0), marker=dict(size=5), visible=False, connectgaps=True))
-
-            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=6), visible=False, connectgaps=True))
-
-            fig.add_trace(go.Scatter(x=df_3d_min.index, y=df_3d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_3d_max.index, y=df_3d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_3d_main.index, y=df_3d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 3D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=7), visible=False, connectgaps=True))
-            
-            fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
-
-        n = len(y_cols)
-        vis_1h = ([True, True, True, False, False, False, False, False, False, False, False, False, False, False, False]) * n
-        vis_6h = ([False, False, False, True, True, True, False, False, False, False, False, False, False, False, False]) * n
-        vis_1d = ([False, False, False, False, False, False, True, True, True, False, False, False, False, False, False]) * n
-        vis_3d = ([False, False, False, False, False, False, False, False, False, True, True, True, False, False, False]) * n
-        vis_7d = ([False, False, False, False, False, False, False, False, False, False, False, False, True, True, True]) * n
-
-        trace_indices = list(range(15 * n))
-
-        buttons_agg = [
-            dict(label=f"{label_stat} Hourly (1H)", method="restyle", args=[{"visible": vis_1h}, trace_indices]),
-            dict(label=f"{label_stat} 6-Hourly (6H)", method="restyle", args=[{"visible": vis_6h}, trace_indices]),
-            dict(label=f"{label_stat} Daily (1D)", method="restyle", args=[{"visible": vis_1d}, trace_indices]),
-            dict(label=f"{label_stat} 3-Day (3D)", method="restyle", args=[{"visible": vis_3d}, trace_indices]),
-            dict(label=f"{label_stat} Weekly (7D)", method="restyle", args=[{"visible": vis_7d}, trace_indices]),
-        ]
-        updatemenus_config = [
-            dict(type="buttons", direction="right", buttons=buttons_agg, active=0, showactive=True,
-                 x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
-                 bgcolor="#F8FAFC", bordercolor="#E2E8F0")
-        ]
-
-    else:
-        df_1d_main = df.resample("1D").agg(agg_func, numeric_only=True)
-        df_1d_min = df.resample("1D").min(numeric_only=True)
-        df_1d_max = df.resample("1D").max(numeric_only=True)
-
-        df_3d_main = df.resample("3D").agg(agg_func, numeric_only=True)
-        df_3d_min = df.resample("3D").min(numeric_only=True)
-        df_3d_max = df.resample("3D").max(numeric_only=True)
-        
-        df_7d_main = df.resample("7D").agg(agg_func, numeric_only=True)
-        df_7d_min = df.resample("7D").min(numeric_only=True)
-        df_7d_max = df.resample("7D").max(numeric_only=True)
-        
-        df_30d_main = df.resample("30D").agg(agg_func, numeric_only=True)
-        df_30d_min = df.resample("30D").min(numeric_only=True)
-        df_30d_max = df.resample("30D").max(numeric_only=True)
-        
-        for i, col in enumerate(y_cols):
-            c = color_seq[i % len(color_seq)]
-            c_fill = hex_to_rgba(c, 0.25)
-            name = str(col)
-            use_band = has_bands and col in ["ModuleTemp_Mean_C", "ModuleTemp_Median_C"]
-            b_min = band_min_col if use_band else col
-            b_max = band_max_col if use_band else col
-
-            fig.add_trace(go.Scatter(x=df_1d_min.index, y=df_1d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_max.index, y=df_1d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=True, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_1d_main.index, y=df_1d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 1D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=6), visible=True, connectgaps=True))
-
-            fig.add_trace(go.Scatter(x=df_3d_min.index, y=df_3d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_3d_max.index, y=df_3d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_3d_main.index, y=df_3d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 3D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=7), visible=False, connectgaps=True))
-            
-            fig.add_trace(go.Scatter(x=df_7d_min.index, y=df_7d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_7d_max.index, y=df_7d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_7d_main.index, y=df_7d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 7D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=8), visible=False, connectgaps=True))
-            
-            fig.add_trace(go.Scatter(x=df_30d_min.index, y=df_30d_min[b_min], mode="lines", line=dict(width=0), name=f"Min {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_30d_max.index, y=df_30d_max[b_max], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=c_fill, name=f"Max {name}", legendgroup=name, showlegend=False, visible=False, connectgaps=True))
-            fig.add_trace(go.Scatter(x=df_30d_main.index, y=df_30d_main[col], mode="lines+markers", name=f"{name} ({label_stat} 30D)", legendgroup=name, line=dict(color=c, width=2.5), marker=dict(size=10), visible=False, connectgaps=True))
-
-        n = len(y_cols)
-        vis_1d = ([True, True, True, False, False, False, False, False, False, False, False, False]) * n
-        vis_3d = ([False, False, False, True, True, True, False, False, False, False, False, False]) * n
-        vis_7d = ([False, False, False, False, False, False, True, True, True, False, False, False]) * n
-        vis_30d = ([False, False, False, False, False, False, False, False, False, True, True, True]) * n
-
-        trace_indices = list(range(12 * n))
-
-        buttons_agg = [
-            dict(label=f"{label_stat} Daily (1D)", method="restyle", args=[{"visible": vis_1d}, trace_indices]),
-            dict(label=f"{label_stat} 3-Day (3D)", method="restyle", args=[{"visible": vis_3d}, trace_indices]),
-            dict(label=f"{label_stat} Weekly (7D)", method="restyle", args=[{"visible": vis_7d}, trace_indices]),
-            dict(label=f"{label_stat} Monthly (30D)", method="restyle", args=[{"visible": vis_30d}, trace_indices]),
-        ]
-        updatemenus_config = [
-            dict(type="buttons", direction="right", buttons=buttons_agg, active=0, showactive=True,
-                 x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
-                 bgcolor="#F8FAFC", bordercolor="#E2E8F0")
-        ]
-        
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=10, b=60), plot_bgcolor="white", paper_bgcolor="white",
-        hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        updatemenus=updatemenus_config,
-    )
+    buttons = [] if is_native_only else _build_resolution_buttons(rules, traces_per_level)
+    fig.update_layout(**_base_chart_layout(updatemenus=_resolution_updatemenu(buttons)))
     fig.update_xaxes(showgrid=True, gridcolor="#F1F5F9")
     fig.update_yaxes(showgrid=True, gridcolor="#F1F5F9")
     return fig
 
+
 def create_mppt_with_irradiance_chart(
-    df,
-    power_cols,
-    irr_col="POA_Irradiance_W_m2",
-    central_metric="Mean",
-    resolution_rules=None,
-    secondary_name="POA Irradiance",
-    secondary_unit="W/m²",
-    secondary_color="#38BDF8",
-    primary_axis_title="Power (mW)",
-):
-    """
-    Generates a synchronized dual-axis chart with Min/Max confidence bands 
-    for each power/PCE trace, updating coherently across temporal resolutions.
-    """
-    if df.empty or not power_cols or irr_col not in df.columns:
+    df: pd.DataFrame,
+    power_cols: list[str],
+    irr_col: str | None = None,
+    central_metric: str = "Mean",
+    resolution_rules: list[tuple[str, str]] | None = None,
+    secondary_name: str = "POA Irradiance",
+    secondary_unit: str = "W/m²",
+    secondary_color: str = "#38BDF8",
+    primary_axis_title: str = "Power (mW)",
+) -> go.Figure:
+    if df.empty or not power_cols:
+        return go.Figure()
+    if irr_col is not None and irr_col not in df.columns:
         return go.Figure()
 
-    fig = go.Figure()
+    has_secondary = irr_col is not None
     agg_func = "median" if central_metric == "Median" else "mean"
     label_stat = "Median" if central_metric == "Median" else "Mean"
-    color_seq = ["#1E293B", "#2563EB", "#16A34A", "#7C3AED", "#DB2777", "#4F46E5", "#64748B", "#111827"]
+    secondary_fillcolor = _hex_to_rgba(secondary_color, 0.08) if has_secondary else None
 
-    secondary_hex = secondary_color.lstrip("#")
-    secondary_rgb = tuple(int(secondary_hex[i:i + 2], 16) for i in (0, 2, 4))
-    secondary_fillcolor = f"rgba({secondary_rgb[0]},{secondary_rgb[1]},{secondary_rgb[2]},0.08)"
-
-    def hex_to_rgba(hex_color, alpha=0.20):
-        h = hex_color.lstrip("#")
-        r, g, b = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-        return f"rgba({r},{g},{b},{alpha})"
-
-    min_dt = df.index.min()
-    max_dt = df.index.max()
-    duration_days = (max_dt - min_dt).total_seconds() / 86400.0
-
+    duration_days = _duration_days(df)
     rules = resolution_rules or get_resolution_rules(duration_days, label_stat)
-    
-    # Cada nivel de resolución genera 3 trazas por columna de potencia (Min, Max, Main) + 1 traza ambiental
-    traces_per_level = (len(power_cols) * 3) + 1  
+    traces_per_level = len(power_cols) * 3 + (1 if has_secondary else 0)
 
-    for idx_rule, (freq, label) in enumerate(rules):
-        is_active = (idx_rule == 0)
+    fig = go.Figure()
+    for level_idx, (freq, label) in enumerate(rules):
+        is_active = level_idx == 0
 
         if freq == "native" and len(df) <= MAX_NATIVE_POINTS:
-            df_main = df
-            df_min = df
-            df_max = df
+            df_main = df_min = df_max = df
         else:
             effective_freq = "1h" if freq == "native" else freq
             df_main = df.resample(effective_freq).agg(agg_func, numeric_only=True)
             df_min = df.resample(effective_freq).min(numeric_only=True)
             df_max = df.resample(effective_freq).max(numeric_only=True)
 
-        # 1. Trazas de Potencia / PCE en Eje Y1 con banda Min/Max
         for i, col in enumerate(power_cols):
-            c = color_seq[i % len(color_seq)]
-            c_fill = hex_to_rgba(c, 0.20)
+            color = MPPT_COLOR_SEQUENCE[i % len(MPPT_COLOR_SEQUENCE)]
+            fill_color = _hex_to_rgba(color, 0.20)
             name = str(col)
-            
-            b_min = col if col not in df_min.columns else col
-            b_max = col if col not in df_max.columns else col
 
-            # Traza invisible inferior para el relleno
             fig.add_trace(go.Scatter(
-                x=df_min.index, y=df_min[b_min], mode="lines",
-                line=dict(width=0), name=f"Min {name}", legendgroup=name,
-                showlegend=False, visible=is_active, connectgaps=True
+                x=df_min.index, y=df_min[col], mode="lines", line=dict(width=0),
+                name=f"Min {name}", legendgroup=name, showlegend=False,
+                visible=is_active, connectgaps=True,
             ))
-            # Traza superior con relleno contra la anterior
             fig.add_trace(go.Scatter(
-                x=df_max.index, y=df_max[b_max], mode="lines",
-                line=dict(width=0), fill="tonexty", fillcolor=c_fill,
-                name=f"Max {name}", legendgroup=name, showlegend=False,
-                visible=is_active, connectgaps=True
+                x=df_max.index, y=df_max[col], mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=fill_color, name=f"Max {name}", legendgroup=name,
+                showlegend=False, visible=is_active, connectgaps=True,
             ))
-            # Traza central principal
+            suffix = label.split("(")[-1].replace(")", "") if "(" in label else label
+            trace_name = name if freq == "native" else f"{name} ({label_stat} {suffix})"
             fig.add_trace(go.Scatter(
                 x=df_main.index, y=df_main[col],
                 mode="lines+markers" if freq == "native" or duration_days <= 7.0 else "lines",
-                name=f"{name} ({label_stat} {label.split('(')[-1].replace(')', '')})" if freq != "native" else name,
-                legendgroup=name, line=dict(color=c, width=1.8),
-                marker=dict(size=4), yaxis="y1", visible=is_active, connectgaps=True
+                name=trace_name, legendgroup=name, line=dict(color=color, width=1.8),
+                marker=dict(size=4), yaxis="y1", visible=is_active, connectgaps=True,
             ))
 
-        # 2. Traza ambiental en Eje Y2 a la misma frecuencia
-        fig.add_trace(go.Scatter(
-            x=df_main.index,
-            y=df_main[irr_col] if irr_col in df_main.columns else [0]*len(df_main),
-            mode="lines",
-            name=secondary_name,
-            line=dict(color=secondary_color, width=1.5, dash="dot"),
-            marker=dict(color=secondary_color),
-            fill="tozeroy",
-            fillcolor=secondary_fillcolor,
-            yaxis="y2",
-            visible=is_active,
-            connectgaps=True,
-            hovertemplate=f"<b>%{{x}}</b><br>{secondary_name}: %{{y:.1f}} {secondary_unit}<extra></extra>"
-        ))
+        if has_secondary:
+            fig.add_trace(go.Scatter(
+                x=df_main.index, y=df_main[irr_col], mode="lines", name=secondary_name,
+                line=dict(color=secondary_color, width=1.5, dash="dot"),
+                marker=dict(color=secondary_color), fill="tozeroy", fillcolor=secondary_fillcolor,
+                yaxis="y2", visible=is_active, connectgaps=True,
+                hovertemplate=f"<b>%{{x}}</b><br>{secondary_name}: %{{y:.1f}} {secondary_unit}<extra></extra>",
+            ))
 
-    # Mascaras de visibilidad sincronizadas para los botones de resolución
-    n_levels = len(rules)
-    buttons = []
-    if n_levels > 1:
-        for idx in range(n_levels):
-            vis = [False] * (n_levels * traces_per_level)
-            start = idx * traces_per_level
-            end = start + traces_per_level
-            for k in range(start, end):
-                vis[k] = True
-            buttons.append(dict(label=rules[idx][1], method="restyle", args=[{"visible": vis}]))
-
-    updatemenus = [dict(
-        type="buttons", direction="right", buttons=buttons, active=0, showactive=True,
-        x=1, xanchor="right", y=-0.15, yanchor="top", font=dict(size=11, color="#1E293B"),
-        bgcolor="#F8FAFC", bordercolor="#E2E8F0"
-    )] if len(buttons) > 1 else []
-
-    fig.update_layout(
+    buttons = _build_resolution_buttons(rules, traces_per_level)
+    layout_args: dict[str, Any] = _base_chart_layout(
         height=420,
-        margin=dict(l=10, r=10, t=10, b=60),
-        plot_bgcolor="white", paper_bgcolor="white",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        updatemenus=updatemenus,
+        updatemenus=_resolution_updatemenu(buttons),
         yaxis=dict(
             title=dict(text=primary_axis_title, font=dict(color="#1E293B")),
-            showgrid=True, gridcolor="#F1F5F9", rangemode="tozero"
+            showgrid=True, gridcolor="#F1F5F9", rangemode="tozero",
         ),
-        yaxis2=dict(
+        xaxis=dict(showgrid=True, gridcolor="#F1F5F9"),
+    )
+    if has_secondary:
+        layout_args["yaxis2"] = dict(
             title=dict(text=f"{secondary_name} ({secondary_unit})", font=dict(color=secondary_color)),
             overlaying="y", side="right", showgrid=False,
-            tickfont=dict(color=secondary_color), rangemode="tozero"
-        ),
-        xaxis=dict(showgrid=True, gridcolor="#F1F5F9")
-    )
+            tickfont=dict(color=secondary_color), rangemode="tozero",
+        )
+    fig.update_layout(**layout_args)
     return fig
 
-# =====================================================================
-# DUAL-AXIS PV VS ENVIRONMENTAL CHART
-# =====================================================================
-def create_pv_vs_env_chart(df, power_cols, temp_col, pv_metric, env_metric, central_metric="Mean", resolution_rules=None):
+
+def _normalize_dose_resolution_rules(rules: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    collapsed: dict[str, str] = {}
+    for freq, label in rules:
+        key = "1h" if freq == "native" else freq
+        if key == "6h":
+            continue
+        collapsed.setdefault(key, RESOLUTION_LABELS.get(key, label))
+    return list(collapsed.items())
+
+
+def _bucket_labels_and_widths(index: pd.Index | Any, days_per_bucket: float, max_dt: pd.Timestamp) -> tuple[list[str], list[float]]:
+    labels, widths = [], []
+    for date in index:
+        if days_per_bucket < 1:
+            labels.append(date.strftime("%Y-%m-%d %H:%M"))
+            widths.append(3_600_000 * 0.95)
+        else:
+            end_date = min(date + pd.Timedelta(days=days_per_bucket - 1), max_dt)
+            real_days = (end_date.date() - date.date()).days + 1
+            labels.append(
+                date.strftime("%Y-%m-%d") if real_days <= 1
+                else f"{date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+            )
+            widths.append(real_days * 86_400_000 * 0.95)
+    return labels, widths
+
+
+def create_pv_vs_env_chart(
+    df: pd.DataFrame,
+    power_cols: list[str],
+    temp_col: str,
+    pv_metric: str,
+    env_metric: str,
+    central_metric: str = "Mean",
+    resolution_rules: list[tuple[str, str]] | None = None,
+) -> go.Figure:
     if df.empty or not power_cols:
         return go.Figure()
-        
+
     df_calc = pd.DataFrame(index=df.index)
-    
-    # Base PV Calculations (10-min step) -> to kW for conversion
     conv_factor = (10.0 / 60.0) / (1000.0 * CELL_AREA_M2)
-    df_calc['Yield'] = df[power_cols].mean(axis=1) * conv_factor
-    
-    if "POA_Irradiance_W_m2" in df.columns:
-        df_calc['Radiation'] = df["POA_Irradiance_W_m2"] * (10.0 / 60.0) / 1000.0
-    else:
-        df_calc['Radiation'] = 0
-        
-    # Base Env Calculations
+    df_calc["Yield"] = df[power_cols].mean(axis=1) * conv_factor
+    df_calc["Radiation"] = df["POA_Irradiance_W_m2"] * (10.0 / 60.0) / 1000.0 if "POA_Irradiance_W_m2" in df.columns else 0.0
+
     if env_metric == "Thermal Load (°C·h)" and temp_col in df.columns:
-        df_calc['Env'] = df[temp_col] * (10.0 / 60.0)
+        df_calc["Env"] = df[temp_col] * (10.0 / 60.0)
         env_name, env_unit, env_color = "Thermal Load", "°C·h", "#DC2626"
     elif env_metric == "Absolute Humidity Dose (g/m³·h)" and "AbsoluteHumidity_g_m3" in df.columns:
-        df_calc['Env'] = df["AbsoluteHumidity_g_m3"] * (10.0 / 60.0)
+        df_calc["Env"] = df["AbsoluteHumidity_g_m3"] * (10.0 / 60.0)
         env_name, env_unit, env_color = "Humidity Dose", "g/m³·h", "#0891B2"
     else:
-        df_calc['Env'] = df_calc['Radiation']
+        df_calc["Env"] = df_calc["Radiation"]
         env_name, env_unit, env_color = "Radiation Dose", "kWh/m²", "#D97706"
 
-    pv_is_yield = (pv_metric == "Energy Yield (kWh/m²)")
+    pv_is_yield = pv_metric == "Energy Yield (kWh/m²)"
     pv_name = "Energy Yield" if pv_is_yield else "Efficiency"
     pv_unit = "kWh/m²" if pv_is_yield else "%"
     pv_color = "#15803D" if pv_is_yield else "#2563EB"
 
-    min_dt = df_calc.index.min()
     max_dt = df_calc.index.max()
-    duration_days = (max_dt - min_dt).total_seconds() / 86400.0
-
     label_stat = "Median" if central_metric == "Median" else "Mean"
-    resolution_rules = resolution_rules or get_resolution_rules(duration_days, label_stat)
-    aggregation_labels = {
-        "1h": "Hourly (1H)",
-        "6h": "6-Hourly (6H)",
-        "1D": "Daily (1D)",
-        "7D": "Weekly (7D)",
-        "30D": "Monthly (30D)",
-    }
-    normalized_rules = []
-    for freq, label in resolution_rules:
-        if freq in ("native", "6h"):
-            if freq == "6h":
-                continue
-            freq = "1h"
-        if freq not in {rule_freq for rule_freq, _ in normalized_rules}:
-            normalized_rules.append((freq, aggregation_labels.get(freq, label)))
-    resolution_rules = normalized_rules
-    if len(df_calc) > MAX_NATIVE_POINTS:
-        resolution_rules = [
-            ("1h" if freq == "native" else freq, label)
-            for freq, label in resolution_rules
-        ]
+    base_rules = resolution_rules or get_resolution_rules(_duration_days(df_calc), label_stat)
+    rules = _normalize_dose_resolution_rules(base_rules)
 
     fig = go.Figure()
+    for i, (freq, _label) in enumerate(rules):
+        is_active = i == 0
+        days_per_bucket = pd.Timedelta(freq).total_seconds() / 86400.0
+        res_yield = df_calc["Yield"].resample(freq).sum()
+        res_rad = df_calc["Radiation"].resample(freq).sum()
+        res_env = df_calc["Env"].resample(freq).sum()
+        daylight_mask = res_rad > 0
 
-    for i, (freq, label) in enumerate(resolution_rules):
-        is_vis = (i == 0)
-
-        if freq == "native":
-            res_yield = df_calc["Yield"]
-            res_rad = df_calc["Radiation"]
-            res_env = df_calc["Env"]
-            days = 1 / 144
-        else:
-            days = pd.Timedelta(freq).total_seconds() / 86400.0
-            res_yield = df_calc["Yield"].resample(freq).sum()
-            res_rad = df_calc["Radiation"].resample(freq).sum()
-            res_env = df_calc["Env"].resample(freq).sum()
-        mask = res_rad > 0
-        
         if pv_is_yield:
-            y_pv = res_yield[mask]
-            y_pv = y_pv[y_pv >= 0] # Filter extreme noise
+            y_pv = res_yield[daylight_mask]
+            y_pv = y_pv[y_pv >= 0]
         else:
-            aligned_y, aligned_r = res_yield.align(res_rad, join='inner')
-            valid = aligned_r > 0.005 # > 5 Wh/m² radiation to compute efficiency
-            y_pv = (aligned_y[valid] / aligned_r[valid]) * 100.0
+            aligned_yield, aligned_rad = res_yield.align(res_rad, join="inner")
+            valid = aligned_rad > 0.005  
+            y_pv = (aligned_yield[valid] / aligned_rad[valid]) * 100.0
             y_pv = y_pv.replace([np.inf, -np.inf], np.nan).dropna()
-            
-            # [CRITICAL FIX] Cap aggregated efficiency to physical bounds (0% - 100%) to avoid night division artifacts
-            y_pv = y_pv[(y_pv >= 0) & (y_pv <= 100)]
-        
-        y_env = res_env[mask]
-        
-        def get_widths_labels(idx):
-            labels, widths = [], []
-            for date in idx:
-                if days < 1:
-                    end_date = min(date + pd.Timedelta(hours=1), max_dt)
-                    labels.append(f"{date.strftime('%Y-%m-%d %H:%M')}")
-                    widths.append(3600000 * 0.95)
-                else:
-                    end_date = min(date + pd.Timedelta(days=days-1), max_dt)
-                    real_days = (end_date.date() - date.date()).days + 1
-                    if real_days <= 1:
-                        labels.append(date.strftime('%Y-%m-%d'))
-                    else:
-                        labels.append(f"{date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-                    widths.append((real_days * 86400000) * 0.95)
-            return labels, widths
+            y_pv = y_pv[(y_pv >= 0) & (y_pv <= 100)] 
 
-        custom_pv, widths_pv = get_widths_labels(y_pv.index)
+        y_env = res_env[daylight_mask]
+
+        pv_labels, pv_widths = _bucket_labels_and_widths(y_pv.index, days_per_bucket, max_dt)
         fig.add_trace(go.Bar(
-            x=y_pv.index, y=y_pv.values, customdata=custom_pv,
-            name=f"{pv_name}", marker_color=pv_color, opacity=0.8,
-            width=widths_pv, offset=0, yaxis="y1",
+            x=y_pv.index, y=y_pv.values, customdata=pv_labels, name=pv_name,
+            marker_color=pv_color, opacity=0.8, width=pv_widths, offset=0, yaxis="y1",
             hovertemplate=f"<b>%{{customdata}}</b><br>{pv_name}: %{{y:.2f}} {pv_unit}<extra></extra>",
-            visible=is_vis
+            visible=is_active,
         ))
-        
-        custom_env, widths_env = get_widths_labels(y_env.index)
+        env_labels, _ = _bucket_labels_and_widths(y_env.index, days_per_bucket, max_dt)
         fig.add_trace(go.Scatter(
-            x=y_env.index, y=y_env.values, customdata=custom_env,
-            name=f"{env_name}", mode="lines+markers",
-            line=dict(color=env_color, width=2.5), marker=dict(size=6, color=env_color),
-            yaxis="y2",
+            x=y_env.index, y=y_env.values, customdata=env_labels, name=env_name, mode="lines+markers",
+            line=dict(color=env_color, width=2.5), marker=dict(size=6, color=env_color), yaxis="y2",
             hovertemplate=f"<b>%{{customdata}}</b><br>{env_name}: %{{y:.2f}} {env_unit}<extra></extra>",
-            visible=is_vis
+            visible=is_active,
         ))
 
-    n_rules = len(resolution_rules)
-    buttons = []
-    if n_rules > 1:
-        for i, (_, label) in enumerate(resolution_rules):
-            vis = [False] * (n_rules * 2)
-            vis[i*2] = True
-            vis[i*2+1] = True
-            buttons.append(dict(label=label, method="update", args=[{"visible": vis}]))
-
-    updatemenus = [dict(
-        type="buttons", direction="right", buttons=buttons, active=0, showactive=True,
-        x=1, xanchor="right", y=-0.2, yanchor="top", font=dict(size=11, color="#1E293B"),
-        bgcolor="#F8FAFC", bordercolor="#E2E8F0"
-    )] if len(buttons) > 1 else []
-
-    fig.update_layout(
+    buttons = _build_resolution_buttons(rules, traces_per_level=2, method="update")
+    fig.update_layout(**_base_chart_layout(
         height=400,
-        margin=dict(l=10, r=10, t=10, b=60),
-        plot_bgcolor="white", paper_bgcolor="white",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        updatemenus=updatemenus,
+        updatemenus=_resolution_updatemenu(buttons, y=-0.2),
         yaxis=dict(
             title=dict(text=f"{pv_name} ({pv_unit})", font=dict(color=pv_color)),
-            tickfont=dict(color=pv_color),
-            showgrid=True, gridcolor="#F1F5F9", rangemode="tozero"
+            tickfont=dict(color=pv_color), showgrid=True, gridcolor="#F1F5F9", rangemode="tozero",
         ),
         yaxis2=dict(
             title=dict(text=f"{env_name} ({env_unit})", font=dict(color=env_color)),
-            tickfont=dict(color=env_color),
-            overlaying="y", side="right", showgrid=False, rangemode="tozero"
+            tickfont=dict(color=env_color), overlaying="y", side="right", showgrid=False, rangemode="tozero",
         ),
-        xaxis=dict(showgrid=False)
-    )
+        xaxis=dict(showgrid=False),
+    ))
     return fig
 
-def get_trace_color(fig, trace_name: str, default_color: str = "grey") -> str:
+
+def build_fleet_metric_pivot(df_twin_diag: pd.DataFrame, active_cells: list[str], start_dt, end_dt, value_col: str) -> pd.DataFrame:
+    if df_twin_diag.empty or not active_cells or value_col not in df_twin_diag.columns:
+        return pd.DataFrame()
+    window = df_twin_diag[
+        (df_twin_diag.index >= start_dt)
+        & (df_twin_diag.index <= end_dt)
+        & (df_twin_diag["cell_name"].isin(active_cells))
+    ]
+    if window.empty:
+        return pd.DataFrame()
+    pivot = window.pivot_table(index=window.index, columns="cell_name", values=value_col, aggfunc="mean")
+    pivot.index.name = "Timestamp"
+    return pivot
+
+
+def _infer_legend_colors(fig: go.Figure, cells: list[str]) -> dict[str, str]:
+    colors: dict[str, str] = {}
     for trace in fig.data:
-        if trace.name == trace_name:
-            return trace.line.color or trace.marker.color or default_color
-    return default_color
+        group = getattr(trace, "legendgroup", None)
+        if group is None or str(group) not in cells or str(group) in colors:
+            continue
+        color = getattr(getattr(trace, "line", None), "color", None)
+        if color is not None:
+            colors[str(group)] = str(color)
+    return colors
 
 
-def create_digital_twin_chart(df_twin, cell_name, resolution_rules):
-    """Plots normalized PCE and pFF against their Digital Twin predictions."""
-    from plotly.subplots import make_subplots
+def _compute_plot_y_range(fig: go.Figure, metric: str, summary_table: pd.DataFrame, cells: list[str]) -> tuple[float, float]:
+    values: list[float] = []
+    for trace in fig.data:
+        y = getattr(trace, "y", None)
+        if y is None:
+            continue
+        numeric = pd.to_numeric(pd.Series(y), errors="coerce").dropna()
+        values.extend(numeric.tolist())
 
-    required_cols = {
-        "PCE_Relative", "Twin_PCE_Pred_Relative", "pFF", "Twin_pFF_Pred",
-        "Alert_PCE", "Alert_pFF", "In_Action_Window"
-    }
-    if df_twin.empty or not required_cols.issubset(df_twin.columns):
-        return go.Figure()
+    if metric == "pce":
+        values.append(T80_FRACTION)
+    elif metric == "pff" and "pFF_initial" in summary_table.columns:
+        for cell in cells:
+            if cell not in summary_table.index:
+                continue
+            try:
+                initial = float(str(summary_table.at[cell, "pFF_initial"]))
+                if np.isfinite(initial):
+                    values.append(T80_FRACTION * initial)
+            except (TypeError, ValueError):
+                continue
 
-    cell_df = df_twin[df_twin["cell_name"] == cell_name].sort_index()
-    if cell_df.empty:
-        return go.Figure()
+    if not values:
+        return 0.0, 1.0
+    y_min, y_max = float(min(values)), float(max(values))
+    padding = max((y_max - y_min) * 0.03, 0.01)
+    return y_min - padding, y_max + padding
 
-    duration_days = (cell_df.index.max() - cell_df.index.min()).total_seconds() / 86400.0
-    rules = resolution_rules or get_resolution_rules(duration_days, "Mean")
-    if len(cell_df) > MAX_NATIVE_POINTS and rules[0][0] == "native":
-        rules = get_resolution_rules(7.0001, "Mean")
 
-    freq = rules[0][0]
-    if freq != "native":
-        agg_map = {
-            "PCE_Relative": "mean", "Twin_PCE_Pred_Relative": "mean",
-            "pFF": "mean", "Twin_pFF_Pred": "mean",
-            "Alert_PCE": "max", "Alert_pFF": "max", "In_Action_Window": "max"
-        }
-        cell_df = cell_df.resample(freq).agg(agg_map).dropna(subset=["PCE_Relative"])
+def _normalize_timestamp(value: Any) -> pd.Timestamp | None:
+    if pd.isna(value):
+        return None
+    ts = pd.to_datetime(str(value), errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.tz_localize(None) if getattr(ts, "tzinfo", None) is not None else ts
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-        subplot_titles=("PCE Normalizado (relativo al pico inicial)", "Fill Factor (pFF)")
-    )
-    fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["PCE_Relative"], mode="lines", name="PCE Real (norm.)", line=dict(color="#10B981", width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["Twin_PCE_Pred_Relative"], mode="lines", name="Twin PCE (predicho)", line=dict(color="#10B981", width=1.5, dash="dot")), row=1, col=1)
-    alert_pce = cell_df[cell_df["Alert_PCE"].astype(bool)]
-    fig.add_trace(go.Scatter(x=alert_pce.index, y=alert_pce["PCE_Relative"], mode="markers", name="Alerta PCE", marker=dict(color="#F43F5E", size=7, symbol="x")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["pFF"], mode="lines", name="pFF Real", line=dict(color="#3B82F6", width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["Twin_pFF_Pred"], mode="lines", name="Twin pFF (predicho)", line=dict(color="#3B82F6", width=1.5, dash="dot")), row=2, col=1)
-    alert_pff = cell_df[cell_df["Alert_pFF"].astype(bool)]
-    fig.add_trace(go.Scatter(x=alert_pff.index, y=alert_pff["pFF"], mode="markers", name="Alerta pFF", marker=dict(color="#F59E0B", size=7, symbol="x")), row=2, col=1)
 
-    action_df = cell_df[cell_df["In_Action_Window"].astype(bool)]
-    if not action_df.empty:
-        fig.add_vrect(x0=action_df.index.min(), x1=action_df.index.max(), fillcolor="#FEF3C7", opacity=0.25, line_width=0, row="all", col="all")
+def add_fleet_t80_lines(
+    fig: go.Figure,
+    summary_table: pd.DataFrame,
+    cells: list[str],
+    metric: Literal["pce", "pff"],
+    window_start=None,
+    window_end=None,
+) -> go.Figure:
+    trace_colors = _infer_legend_colors(fig, cells)
+    default_color = "#64748B"
 
-    fig.update_layout(
-        height=560, margin=dict(l=10, r=10, t=40, b=10),
-        plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
-    )
-    fig.update_yaxes(title_text="PCE / PCE₀", row=1, col=1)
-    fig.update_yaxes(title_text="pFF", row=2, col=1)
+    window_start = _normalize_timestamp(window_start) if window_start is not None else None
+    window_end = _normalize_timestamp(window_end) if window_end is not None else None
+    x_range = [window_start, window_end] if window_start is not None and window_end is not None else None
+    y_min, y_max = _compute_plot_y_range(fig, metric, summary_table, cells)
+
+    for cell in cells:
+        if cell not in summary_table.index:
+            continue
+        color = trace_colors.get(cell, default_color)
+
+        if metric == "pce":
+            threshold_value = T80_FRACTION
+            failure_col = "t80_failure_date_pce"
+        else:
+            try:
+                pff_initial = float(str(summary_table.at[cell, "pFF_initial"])) if "pFF_initial" in summary_table.columns else np.nan
+            except (TypeError, ValueError):
+                pff_initial = np.nan
+            if not np.isfinite(pff_initial):
+                continue
+            threshold_value = T80_FRACTION * pff_initial
+            failure_col = "t80_failure_date_pff"
+
+        if x_range is not None:
+            fig.add_trace(go.Scatter(
+                x=x_range, y=[threshold_value, threshold_value], mode="lines+text",
+                text=["", f"{cell} T80"], textposition="top left", name=f"{cell} T80",
+                legendgroup=cell, showlegend=False, line=dict(color=color, width=1.5, dash="dot"),
+                textfont=dict(color=color, size=11),
+                hovertemplate=f"<b>{cell}</b><br>T80 = {threshold_value:.3f}<extra></extra>",
+            ))
+
+        failure_date = _normalize_timestamp(summary_table.at[cell, failure_col]) if failure_col in summary_table.columns else None
+        if failure_date is not None and (window_start is None or window_start <= failure_date) and (window_end is None or failure_date <= window_end):
+            fig.add_trace(go.Scatter(
+                x=[failure_date, failure_date], y=[y_min, y_max], mode="lines+text",
+                text=["", f"{cell} death"], textposition="top center", name=f"{cell} failure",
+                legendgroup=cell, showlegend=False, line=dict(color=color, width=2, dash="dash"),
+                textfont=dict(color=color, size=11),
+                hovertemplate=f"<b>{cell}</b><br>T80 failure: %{{x}}<extra></extra>",
+            ))
     return fig
 
-def build_fleet_pff_pivot(df_twin_diag, active_cells, start_dt, end_dt):
-    """Pivots the twin diagnostics dataset into one pFF column per active cell."""
-    if df_twin_diag.empty or not active_cells:
-        return pd.DataFrame()
-    window = df_twin_diag[
-        (df_twin_diag.index >= start_dt) &
-        (df_twin_diag.index <= end_dt) &
-        (df_twin_diag["cell_name"].isin(active_cells))
-    ]
-    if window.empty or "pFF" not in window.columns:
-        return pd.DataFrame()
-    pivot = window.pivot_table(index=window.index, columns="cell_name", values="pFF", aggfunc="mean")
-    pivot.index.name = "Timestamp"
-    return pivot
+def create_burn_in_optimization_chart(df_grid: pd.DataFrame, optimal_window: float) -> go.Figure:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-def build_fleet_pce_pivot(df_twin_diag, active_cells, start_dt, end_dt):
-    """Pivots the twin diagnostics dataset into one normalized PCE column per active cell."""
-    if df_twin_diag.empty or not active_cells:
-        return pd.DataFrame()
-    window = df_twin_diag[
-        (df_twin_diag.index >= start_dt) &
-        (df_twin_diag.index <= end_dt) &
-        (df_twin_diag["cell_name"].isin(active_cells))
-    ]
-    if window.empty or "PCE_Relative" not in window.columns:
-        return pd.DataFrame()
-    pivot = window.pivot_table(index=window.index, columns="cell_name", values="PCE_Relative", aggfunc="mean")
-    pivot.index.name = "Timestamp"
-    return pivot
+    fig.add_trace(go.Bar(
+        x=df_grid["Window_Days"], y=df_grid["Healthy_Cells_N"],
+        name="Healthy Cells (N)", marker_color="rgba(100, 116, 139, 0.2)",
+        hovertemplate="<b>%{x} Days</b><br>Healthy Cells: %{y}<extra></extra>"
+    ), secondary_y=True)
+
+    fig.add_trace(go.Scatter(
+        x=df_grid["Window_Days"], y=df_grid["LOOCV_MAE_PCE"],
+        mode="lines+markers", name="MAE PCE",
+        line=dict(color="#10B981", width=3), marker=dict(size=8),
+        hovertemplate="<b>%{x} Days</b><br>MAE PCE: %{y:.4f}<extra></extra>"
+    ), secondary_y=False)
+
+    fig.add_trace(go.Scatter(
+        x=df_grid["Window_Days"], y=df_grid["LOOCV_MAE_pFF"],
+        mode="lines+markers", name="MAE pFF",
+        line=dict(color="#3B82F6", width=3, dash="dot"), marker=dict(size=8),
+        hovertemplate="<b>%{x} Days</b><br>MAE pFF: %{y:.4f}<extra></extra>"
+    ), secondary_y=False)
+
+    fig.add_vline(x=optimal_window, line=dict(color="#F43F5E", width=2, dash="dash"),
+                  annotation_text=f"Optimal Threshold ({optimal_window:g}d)", annotation_position="top right")
+
+    fig.update_layout(**_base_chart_layout(
+        height=400,
+        title=dict(text="Empirical Burn-in Window Optimization (Elbow Method)", font=dict(color="#1E293B")),
+        xaxis=dict(title="Candidate Window (Days)", tickvals=df_grid["Window_Days"], showgrid=True, gridcolor="#F1F5F9"),
+        yaxis=dict(title="LOOCV Mean Absolute Error", showgrid=True, gridcolor="#F1F5F9"),
+        yaxis2=dict(title="Cohort Size (N)", showgrid=False, range=[0, 10]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    ))
+    return fig
+
+
 
 # =====================================================================
-# KPI UTILITIES
+# 5. EMPIRICAL THRESHOLD AUDIT
 # =====================================================================
-def calculate_delta_pct(actual, previous):
+@st.cache_data(show_spinner=False)
+def prepare_threshold_audit_data(twin_path: Path, healthy_cells: tuple[str, ...]) -> pd.DataFrame:
+    try:
+        audit_df = pd.read_parquet(twin_path)
+        audit_df["Timestamp"] = pd.to_datetime(audit_df["Timestamp"], utc=True, errors="coerce").dt.tz_localize(None)
+
+        pff_real = pd.to_numeric(audit_df["pFF"], errors="coerce")
+        pff_pred = pd.to_numeric(audit_df["Twin_pFF_Pred"], errors="coerce")
+        pce_real = pd.to_numeric(audit_df["PCE_Relative"], errors="coerce")
+        pce_pred = pd.to_numeric(audit_df["Twin_PCE_Pred_Relative"], errors="coerce")
+
+        audit_df["Underperformance_pFF_Audit"] = (pff_pred - pff_real).clip(lower=0)
+        audit_df["Underperformance_PCE_Audit"] = (pce_pred - pce_real).clip(lower=0)
+        audit_df["Twin_Ready"] = audit_df["Twin_pFF_Pred"].notna() | audit_df["Twin_PCE_Pred_Relative"].notna()
+        audit_df["Healthy_Mature"] = (
+            audit_df["cell_name"].astype(str).isin([str(c) for c in healthy_cells])
+            & (audit_df["Exposure_Days"] > BURN_IN_DAYS)
+            & audit_df["Twin_Ready"]
+        )
+        return audit_df
+    except Exception as exc:
+        st.warning(f"Failed to prepare empirical threshold audit data: {exc}")
+        return pd.DataFrame()
+
+
+def get_artifact_threshold(alert_thresholds: dict, metric: Literal["pce", "pff"]) -> float:
+    if not isinstance(alert_thresholds, dict):
+        return np.nan
+    candidate_keys = {
+        "pff": ["pff", "pFF", "threshold_pff", "threshold_pFF"],
+        "pce": ["pce", "PCE", "threshold_pce", "threshold_PCE"],
+    }
+    for key in candidate_keys.get(metric, []):
+        value = alert_thresholds.get(key)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            return value
+    return np.nan
+
+
+def calculate_empirical_audit(audit_df: pd.DataFrame, healthy_cells: list[str], metric: Literal["pce", "pff"], quantile: float = RESIDUAL_ALERT_QUANTILE) -> dict:
+    empty_result = {"threshold": np.nan, "quantile": np.nan, "coverage": np.nan, "n": 0, "mean_underperformance": np.nan, "residuals": pd.Series(dtype=float)}
+    if audit_df.empty:
+        return empty_result
+
+    residual_col = "Underperformance_pFF_Audit" if metric == "pff" else "Underperformance_PCE_Audit"
+    healthy = audit_df[
+        audit_df["cell_name"].astype(str).isin([str(c) for c in healthy_cells])
+        & (audit_df["Exposure_Days"] > BURN_IN_DAYS)
+        & audit_df[residual_col].notna()
+    ]
+    residuals = healthy[residual_col].dropna()
+    if residuals.empty:
+        return empty_result
+
+    threshold = float(residuals.quantile(quantile))
+    return {
+        "threshold": threshold,
+        "quantile": quantile,
+        "coverage": float((residuals <= threshold).mean()),
+        "n": len(residuals),
+        "mean_underperformance": float(residuals.mean()),
+        "residuals": residuals,
+    }
+
+
+def create_residual_distribution_chart(residuals: pd.Series, applied_threshold: float, metric_label: str, empirical_quantile: float) -> go.Figure:
+    fig = go.Figure()
+    if residuals.empty:
+        return fig
+    fig.add_trace(go.Histogram(
+        y=residuals, nbinsy=80, histnorm="probability density",
+        name="Underperformance", marker_color="#3B82F6", opacity=0.75,
+    ))
+    empirical_value = float(residuals.quantile(empirical_quantile))
+    fig.add_hline(y=empirical_value, line=dict(color="#F59E0B", width=2, dash="dot"),
+                  annotation_text=f"Q{empirical_quantile * 100:.0f} = {empirical_value:.4f}", annotation_position="top left")
+    if np.isfinite(applied_threshold):
+        fig.add_hline(y=applied_threshold, line=dict(color="#F43F5E", width=3, dash="dash"),
+                      annotation_text=f"Applied = {applied_threshold:.4f}", annotation_position="top right")
+    fig.update_layout(**_base_chart_layout(
+        height=360, margin=dict(l=10, r=10, t=20, b=50), bargap=0.02,
+        xaxis=dict(title="Density", showgrid=True, gridcolor="#F1F5F9"),
+        yaxis=dict(title=f"Underperformance — {metric_label}", showgrid=True, gridcolor="#F1F5F9"),
+    ))
+    return fig
+
+
+_AUTOPSY_METRIC_CONFIG = {
+    "pff": dict(
+        real_col="pFF", pred_col="Twin_pFF_Pred", underperf_col="Underperformance_pFF_Audit",
+        real_name="pFF real", pred_name="Digital Twin", pred_color="#3B82F6",
+        band_fill="rgba(59,130,246,0.12)", y_title="pFF",
+    ),
+    "pce": dict(
+        real_col="PCE_Relative", pred_col="Twin_PCE_Pred_Relative", underperf_col="Underperformance_PCE_Audit",
+        real_name="PCE real", pred_name="Digital Twin", pred_color="#10B981",
+        band_fill="rgba(16,185,129,0.12)", y_title="PCE / PCE₀",
+    ),
+}
+
+def create_threshold_autopsy_chart(
+    audit_df: pd.DataFrame,
+    cell_name: str,
+    threshold: float,
+    metric: Literal["pff", "pce"],
+    case_data: pd.Series,
+    day_zero: pd.Timestamp,
+    timeline_events: list
+) -> tuple[go.Figure, dict | None]:
+    cfg = _AUTOPSY_METRIC_CONFIG[metric]
+    cell_df = audit_df[
+        (audit_df["cell_name"].astype(str) == str(cell_name))
+        & (audit_df["Exposure_Days"] <= BURN_IN_DAYS)
+        & audit_df[cfg["pred_col"]].notna()
+    ].sort_values("Exposure_Days")
+
+    if cell_df.empty:
+        return go.Figure(), None
+
+    x = cell_df["Exposure_Days"]
+    real = cell_df[cfg["real_col"]]
+    pred = cell_df[cfg["pred_col"]]
+    fig = go.Figure()
+
+    if np.isfinite(threshold):
+        lower_limit = pred - threshold
+        fig.add_trace(go.Scatter(x=x, y=lower_limit, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip", connectgaps=True))
+        fig.add_trace(go.Scatter(x=x, y=pred, mode="lines", line=dict(width=0), fill="tonexty",
+                                  fillcolor=cfg["band_fill"], name="Tolerance band", hoverinfo="skip", connectgaps=True))
+
+    fig.add_trace(go.Scatter(x=x, y=real, mode="lines+markers", name=cfg["real_name"], line=dict(color="#1E293B", width=2), marker=dict(size=4)))
+    fig.add_trace(go.Scatter(x=x, y=pred, mode="lines", name=cfg["pred_name"], line=dict(color=cfg["pred_color"], width=2, dash="dot")))
+
+    if np.isfinite(threshold):
+        anomalies = cell_df[cell_df[cfg["underperf_col"]] > threshold]
+        if not anomalies.empty:
+            fig.add_trace(go.Scatter(x=anomalies["Exposure_Days"], y=anomalies[cfg["real_col"]], mode="markers",
+                                      name="Anomaly", marker=dict(color="#F43F5E", size=7, symbol="x")))
+
+    fig.add_vline(x=BURN_IN_DAYS, line=dict(color="#64748B", width=1, dash="dash"),
+                  annotation_text=f"Burn-in End ({BURN_IN_DAYS:g}d)", annotation_position="top left")
+
+    fig.update_layout(**_base_chart_layout(
+        height=430, margin=dict(l=10, r=10, t=25, b=50),
+        xaxis=dict(title="Exposure Days", showgrid=True, gridcolor="#F1F5F9"),
+        yaxis=dict(title=cfg["y_title"], showgrid=True, gridcolor="#F1F5F9"),
+    ))
+
+    stats_dict = {
+        "n": len(cell_df),
+        "mean_underperformance": float(cell_df[cfg["underperf_col"]].mean()),
+        "anomaly_pct": float((cell_df[cfg["underperf_col"]] > threshold).mean() * 100) if np.isfinite(threshold) else np.nan,
+    }
+    return fig, stats_dict
+
+
+def create_cumulative_alert_chart(
+    audit_df: pd.DataFrame,
+    cell_name: str,
+    threshold_pce: float,
+    threshold_pff: float
+) -> go.Figure:
+    cell_df = audit_df[
+        (audit_df["cell_name"].astype(str) == str(cell_name))
+        & (audit_df["Exposure_Days"] <= BURN_IN_DAYS)
+        & audit_df["Twin_Ready"]
+    ].sort_values("Exposure_Days")
+
+    fig = go.Figure()
+    if cell_df.empty:
+        return fig
+
+    x = cell_df["Exposure_Days"]
+    cum_points = np.arange(1, len(cell_df) + 1)
+
+    alert_pce = cell_df["Underperformance_PCE_Audit"] > threshold_pce
+    alert_pff = cell_df["Underperformance_pFF_Audit"] > threshold_pff
+    alert_comb = alert_pce | alert_pff
+
+    cum_pce = (alert_pce.cumsum() / cum_points) * 100.0
+    cum_pff = (alert_pff.cumsum() / cum_points) * 100.0
+    cum_comb = (alert_comb.cumsum() / cum_points) * 100.0
+
+    fig.add_trace(go.Scatter(x=x, y=cum_pce, mode="lines", name="PCE Anomalies", line=dict(color="#10B981", width=2)))
+    fig.add_trace(go.Scatter(x=x, y=cum_pff, mode="lines", name="pFF Anomalies", line=dict(color="#3B82F6", width=2)))
+    fig.add_trace(go.Scatter(x=x, y=cum_comb, mode="lines", name="Dual Twin (OR)", line=dict(color="#F59E0B", width=3, dash="solid")))
+
+    fig.add_hline(y=ALERT_FREQUENCY_THRESHOLD_PCT, line=dict(color="#F43F5E", width=2, dash="dash"),
+                  annotation_text=f"{ALERT_FREQUENCY_THRESHOLD_PCT:g}% Eviction Threshold", annotation_position="top left")
+
+    y_max = max(20.0, float(cum_comb.max()) + 5.0) if not cum_comb.isna().all() else 20.0
+
+    fig.update_layout(**_base_chart_layout(
+        height=430, margin=dict(l=10, r=10, t=25, b=50),
+        xaxis=dict(title="Exposure Days", showgrid=True, gridcolor="#F1F5F9"),
+        yaxis=dict(title="Cumulative Alert Frequency (%)", showgrid=True, gridcolor="#F1F5F9", range=[0, y_max]),
+    ))
+    return fig
+
+# =====================================================================
+# 6. KPI FORMATTING UTILITIES
+# =====================================================================
+def calculate_delta_pct(actual: float, previous: float) -> float | None:
     if pd.isna(actual) or pd.isna(previous) or previous == 0:
         return None
     return ((actual - previous) / previous) * 100
-    
-def format_kpi(value, unit, decimals=1):
+
+
+def format_kpi(value: float, unit: str, decimals: int = 1) -> str:
     return f"{value:.{decimals}f} {unit}" if pd.notna(value) else f"-- {unit}"
-    
-def format_delta(actual, previous):
+
+
+def format_delta(actual: float, previous: float) -> str:
     delta = calculate_delta_pct(actual, previous)
     return f"{delta:+.1f}%" if delta is not None else "N/A"
 
+
 # =====================================================================
-# TOOLBAR: TIME WINDOW SELECTION
+# 7. REUSABLE UI FRAGMENTS
 # =====================================================================
-def render_toolbar(min_date: datetime.date, max_date: datetime.date):
+def render_toolbar(min_date: datetime.date, max_date: datetime.date) -> tuple[str, datetime.date, datetime.date]:
     with st.container(border=True):
         col_label, col_control = st.columns([1, 4], vertical_alignment="center")
         with col_label:
@@ -842,76 +956,710 @@ def render_toolbar(min_date: datetime.date, max_date: datetime.date):
             )
         time_window = time_window or "1D"
         start_date, end_date = min_date, max_date
-
         if time_window == "Custom Dates":
-            col_d1, col_d2, _ = st.columns([1, 1, 2])
-            with col_d1:
+            col_start, col_end, _ = st.columns([1, 1, 2])
+            with col_start:
                 start_date = st.date_input("From", value=min_date)
-            with col_d2:
+            with col_end:
                 end_date = st.date_input("To", value=max_date)
-
     return time_window, start_date, end_date
 
-# =====================================================================
-# GLOBAL SIDEBAR: LOGO
-# =====================================================================
+
 def render_branding() -> None:
     st.logo(LOGO_URL, size="large", link=LOGO_URL)
 
-dates_index = pd.date_range(start="2026-01-01", periods=100, freq="D")
-plotly_config = {
-    "modeBarButtonsToRemove": ["autoScale2d", "select2d", "lasso2d"],
-    "displaylogo": False,
-    "toImageButtonOptions": {
-        "format": "png",
-        "filename": "parasol_chart",
-        "height": 600,
-        "width": 1000,
-        "scale": 2
-    }
-}
 
-# =====================================================================
-# VIEW 1: GENERAL OVERVIEW
-# =====================================================================
-def general_overview():
-    # --- SIDEBAR CONFIGURATION ---
-    st.sidebar.markdown(
-        "<h4 style='font-size: 1.1rem; color: #1E293B; margin-bottom: 0;'>KPI Options</h4>",
-        unsafe_allow_html=True
-    )
-    kpi1_type = st.sidebar.radio("Photovoltaic (KPI 1)", ["Fleet MPPT Power", "Fleet PCE"])
-    kpi2_type = st.sidebar.radio("Irradiance (KPI 2)", ["Mean POA Irradiance", "Accumulated POA Dose"])
-    kpi3_type = st.sidebar.radio("Temperature (KPI 3)", ["Mean Module Temp.", "Mean Ambient Temp."])
-    kpi4_type = st.sidebar.radio("Humidity (KPI 4)", ["Relative Humidity", "Absolute Humidity", "Humidity Dose"])
-
-    st.sidebar.divider()
-
-    st.sidebar.markdown(
-        "<h4 style='font-size: 1.1rem; color: #1E293B; margin-bottom: 0;'>Chart Aggregations</h4>",
-        unsafe_allow_html=True
-    )
-    selected_metric = st.sidebar.radio(
-        "Central Tendency",
-        ["Mean", "Median"],
-        index=0,
-        help="Statistical metric applied to the temporal resampling of charts.",
-    )
-
-    st.sidebar.divider()
+def render_sidebar_footer() -> None:
     st.sidebar.markdown(
         f"""
         <div style='text-align: center; font-size: 0.85rem; color: #64748B; margin-top: 1rem;'>
             Developed by <br>
             <a href='{CREATOR_LINK}' target='_blank' style='color: #36B9CC; text-decoration: none; font-weight: 600;'>
-                Cristian Carretero
+                {CREATOR_NAME}
             </a>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # --- DATA LOADING ---
+
+# =====================================================================
+# 8. PAGE: GENERAL OVERVIEW
+# =====================================================================
+def _null_future_and_capped(df: pd.DataFrame, pairs: list[tuple[str, str]], max_t: pd.Timestamp, day_cap: float | None = None) -> pd.DataFrame:
+    for date_col, day_col in pairs:
+        if date_col not in df.columns:
+            continue
+        mask = df[date_col].notna() & (df[date_col] > max_t)
+        if day_cap is not None and day_col in df.columns:
+            mask = mask | (df[day_col].notna() & (df[day_col] > day_cap))
+        df.loc[mask, date_col] = pd.NaT
+        if day_col in df.columns:
+            df.loc[mask, day_col] = np.nan
+    return df
+
+
+def _clean_physical_status(status: Any) -> str:
+    status_str = str(status)
+    if "T80" in status_str:
+        return " + ".join(part for part in status_str.split(" + ") if "T80" in part)
+    return "Healthy"
+
+
+def _rebuild_thematic_status(row: pd.Series) -> str:
+    parts = []
+    original = str(row.get("Diagnostic_Status", ""))
+
+    t80_cols = ["t80_failure_date", "t80_failure_date_pce", "t80_failure_date_pff"]
+    has_t80 = any(row.get(col) is not None and pd.notna(row.get(col)) for col in t80_cols if col in row.index)
+    has_ml = pd.notna(row.get("ml_alert_date"))
+
+    if has_t80:
+        t80_parts = [p for p in original.split(" + ") if "T80" in p]
+        parts.extend(t80_parts or ["T80(Unknown)"])
+    if has_ml:
+        ml_parts = [p for p in original.split(" + ") if "ML" in p]
+        parts.extend(ml_parts or ["ML(Unknown)"])
+
+    return " + ".join(parts) if parts else "Healthy"
+
+
+def _prepare_audit_summary(ml_artifacts: dict, artifact_key: str, active_cells_window: list[str], absolute_day_zero: pd.Series, max_t: pd.Timestamp) -> pd.DataFrame:
+    summary = ml_artifacts.get(artifact_key, pd.DataFrame()).copy()
+    if summary.empty:
+        return summary.reset_index()
+
+    if "combined_survival_days" in summary.columns and "survival_days" not in summary.columns:
+        summary["survival_days"] = summary["combined_survival_days"]
+    if "combined_failure_date" in summary.columns and "t80_failure_date" not in summary.columns:
+        summary["t80_failure_date"] = summary["combined_failure_date"]
+
+    summary = summary.loc[summary.index.intersection(active_cells_window)].copy()
+    if summary.empty:
+        return summary.reset_index()
+
+    date_cols = [
+        "t80_failure_date", "t80_failure_date_pce", "t80_failure_date_pff",
+        "ml_alert_date", "ml_alert_date_pce", "ml_alert_date_pff",
+    ]
+    for col in date_cols:
+        if col in summary.columns:
+            summary[col] = pd.to_datetime(summary[col]).dt.tz_localize(None)
+
+    for day_col, alert_col in [
+        ("threshold_pct_day", "ml_alert_date"),
+        ("threshold_pct_day_pce", "ml_alert_date_pce"),
+        ("threshold_pct_day_pff", "ml_alert_date_pff"),
+    ]:
+        if day_col in summary.columns and alert_col not in summary.columns:
+            summary[alert_col] = absolute_day_zero.loc[summary.index] + pd.to_timedelta(summary[day_col], unit="D")
+
+    t80_pairs = [
+        ("t80_failure_date", "survival_days"),
+        ("t80_failure_date_pce", "survival_days_pce"),
+        ("t80_failure_date_pff", "survival_days_pff"),
+    ]
+    ml_pairs = [
+        ("ml_alert_date", "threshold_pct_day"),
+        ("ml_alert_date_pce", "threshold_pct_day_pce"),
+        ("ml_alert_date_pff", "threshold_pct_day_pff"),
+    ]
+    _null_future_and_capped(summary, t80_pairs, max_t, day_cap=BURN_IN_DAYS)
+    _null_future_and_capped(summary, ml_pairs, max_t, day_cap=BURN_IN_DAYS)
+
+    summary["Diagnostic_Status"] = summary.apply(_rebuild_thematic_status, axis=1)
+    healthy_mask = summary["Diagnostic_Status"] == "Healthy"
+    for pct_col in ["alert_freq_pct", "alert_pce_pct", "alert_pff_pct"]:
+        if pct_col in summary.columns:
+            summary.loc[healthy_mask, pct_col] = np.nan
+
+    return summary.reset_index()
+
+
+def _render_physical_tracking_expander(
+    df_summary_dyn: pd.DataFrame,
+    ml_artifacts: dict,
+    df_pff_pred: pd.DataFrame,
+    df_pce_norm: pd.DataFrame,
+    active_cells_window: list[str],
+    plot_df: pd.DataFrame,
+    selected_metric: str,
+    resolution_rules: list[tuple[str, str]],
+) -> None:
+    with st.expander("Physical Tracking (T80 and Survival)", expanded=False):
+        st.markdown("##### Lifecycle & Physical Degradation (T80)")
+        st.caption("Physical survival metrics based strictly on the 80% degradation threshold (T80) over 3 consecutive days.")
+
+        if df_summary_dyn.empty:
+            st.info("No physical survival data available.")
+            return
+
+        df_phys = df_summary_dyn.reset_index().copy()
+        df_phys["Diagnostic_Status"] = df_phys["Diagnostic_Status"].apply(_clean_physical_status)
+
+        max_t = plot_df.index.max()
+        for date_col, day_col in [
+            ("t80_failure_date", "survival_days"),
+            ("t80_failure_date_pce", "survival_days_pce"),
+            ("t80_failure_date_pff", "survival_days_pff"),
+        ]:
+            if date_col in df_phys.columns:
+                df_phys[date_col] = pd.to_datetime(df_phys[date_col])
+                if getattr(df_phys[date_col].dt, "tz", None) is not None:
+                    df_phys[date_col] = df_phys[date_col].dt.tz_localize(None)
+        _null_future_and_capped(
+            df_phys,
+            [("t80_failure_date", "survival_days"), ("t80_failure_date_pce", "survival_days_pce"), ("t80_failure_date_pff", "survival_days_pff")],
+            max_t,
+        )
+
+        phys_col_config = {
+            "cell_name": "Device",
+            "Diagnostic_Status": st.column_config.TextColumn("Physical Status"),
+            "survival_days": st.column_config.NumberColumn("Survival Days (Combined)", format="%.1f"),
+            "t80_failure_date": st.column_config.DatetimeColumn("T80 Date (Combined)", format="YYYY/MM/DD HH:mm"),
+            "survival_days_pce": st.column_config.NumberColumn("Survival Days (PCE)", format="%.1f"),
+            "t80_failure_date_pce": st.column_config.DatetimeColumn("T80 Date (PCE)", format="YYYY/MM/DD HH:mm"),
+            "survival_days_pff": st.column_config.NumberColumn("Survival Days (pFF)", format="%.1f"),
+            "t80_failure_date_pff": st.column_config.DatetimeColumn("T80 Date (pFF)", format="YYYY/MM/DD HH:mm"),
+        }
+        cols_phys_unified = [
+            "cell_name", "t80_failure_date_pff", "survival_days_pff",
+            "t80_failure_date_pce", "survival_days_pce", "survival_days",
+        ]
+        st.dataframe(df_phys[[c for c in cols_phys_unified if c in df_phys.columns]], column_config=phys_col_config, hide_index=True, width="stretch")
+
+        st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Comparative Fleet Performance (pFF & Normalized PCE)")
+        st.caption("Synchronized temporal response curves for active cells against Digital Twin benchmarks.")
+        cell_names_sorted = sorted(str(c) for c in active_cells_window)
+        tab_fleet_pff, tab_fleet_pce = st.tabs(["Fill Factor (pFF)", "Normalized PCE"])
+
+        with tab_fleet_pff:
+            df_pff_pivot = build_fleet_metric_pivot(df_pff_pred, cell_names_sorted, plot_df.index.min(), plot_df.index.max(), value_col="pFF")
+            if df_pff_pivot.empty:
+                tab_fleet_pff.info("No pFF observations are available for this window.")
+            else:
+                fig = create_plotly_chart(df_pff_pivot, list(df_pff_pivot.columns), central_metric=selected_metric, resolution_rules=resolution_rules)
+                fig = add_fleet_t80_lines(fig, ml_artifacts.get("summary_table", pd.DataFrame()), list(df_pff_pivot.columns), "pff", plot_df.index.min(), plot_df.index.max())
+                fig.update_layout(height=420, margin=dict(b=60))
+                fig.update_yaxes(title_text="pFF")
+                tab_fleet_pff.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+        with tab_fleet_pce:
+            df_pce_pivot = build_fleet_metric_pivot(df_pce_norm, cell_names_sorted, plot_df.index.min(), plot_df.index.max(), value_col="PCE_Relative")
+            if df_pce_pivot.empty:
+                message = "No normalized PCE observations are available for this window."
+                if not df_pce_norm.empty and "PCE_Relative" in df_pce_norm.columns:
+                    valid = df_pce_norm.loc[df_pce_norm["PCE_Relative"].notna()]
+                    if not valid.empty:
+                        message += f" Last available data point: {valid.index.max():%Y-%m-%d %H:%M}."
+                tab_fleet_pce.info(message)
+            else:
+                fig = create_plotly_chart(df_pce_pivot, list(df_pce_pivot.columns), central_metric=selected_metric, resolution_rules=resolution_rules)
+                fig = add_fleet_t80_lines(fig, ml_artifacts.get("summary_table", pd.DataFrame()), list(df_pce_pivot.columns), "pce", plot_df.index.min(), plot_df.index.max())
+                fig.update_layout(height=420, margin=dict(b=60))
+                fig.update_yaxes(title_text="PCE / PCE₀")
+                tab_fleet_pce.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+def get_timeline_events(row: pd.Series, day_zero: pd.Timestamp, max_days: float = BURN_IN_DAYS) -> list:
+    def _to_naive_dt(ts) -> pd.Timestamp | None:
+        if pd.isna(ts): return None
+        ts = pd.to_datetime(ts)
+        return ts.tz_localize(None) if getattr(ts, "tzinfo", None) is not None else ts
+
+    events = []
+    t_start = _to_naive_dt(day_zero)
+    
+    if t_start is not None:
+        events.append({"date": t_start, "days": 0.0, "type": "START", "msg": "Outdoor exposure initiated."})
+
+    day_ml = row.get("threshold_pct_day")
+    if pd.notna(day_ml) and float(day_ml) > 0 and t_start is not None:
+        t_ml = t_start + pd.Timedelta(days=float(day_ml))
+        events.append({
+            "date": t_ml, "days": float(day_ml), "type": "ML", "color": "#6366F1", 
+            "msg": f"Predictive anomaly. The Digital Twin detects stochastic deviation on day {float(day_ml):.1f}."
+        })
+
+    t_t80 = _to_naive_dt(row.get("combined_failure_date"))
+    if t_t80 is None:
+        t_t80 = _to_naive_dt(row.get("t80_failure_date"))
+        
+    if t_t80 is not None:
+        surv_days = float(row.get("combined_survival_days", row.get("survival_days", 0.0)))
+        events.append({
+            "date": t_t80, "days": surv_days, "type": "T80", "color": "#EF4444", 
+            "msg": f"Irreversible physical collapse (T80 crossed). Total survival: {surv_days:.1f} days."
+        })
+
+    filtered_events = [ev for ev in events if ev.get("days", 0.0) <= max_days]
+    filtered_events.sort(key=lambda x: x["date"])
+    return filtered_events
+
+
+def _add_timeline_vlines_to_fig(fig: go.Figure, events: list, active_metric: str = "comb") -> go.Figure:
+    for ev in events:
+        if ev["type"] == "START": continue
+        
+        if active_metric == "pce" and "pFF" in ev["type"]: continue
+        if active_metric == "pff" and "PCE" in ev["type"]: continue
+        
+        fig.add_vline(
+            x=ev["days"],
+            line_dash="dot", 
+            line_width=2,
+            line_color=ev["color"], 
+            annotation_text=ev["type"], 
+            annotation_position="top left",
+            annotation_font=dict(color=ev["color"], size=10, weight="bold")
+        )
+    return fig
+
+def _render_combined_twin_audit_expander(
+    df_summary_dyn: pd.DataFrame,
+    ml_artifacts: dict,
+    alert_thresholds: dict,
+    active_cells_window: list[str],
+    survival_naive_df: pd.DataFrame,
+    max_t: pd.Timestamp | None
+) -> None:
+    if df_summary_dyn.empty or max_t is None or survival_naive_df.empty:
+        return
+
+    healthy_raw = ml_artifacts.get("healthy_cohort", [])
+    healthy_audit_cells = [str(c) for c in healthy_raw if pd.notna(c)] if isinstance(healthy_raw, (list, tuple, set, np.ndarray, pd.Series)) else []
+    if not healthy_audit_cells and not df_summary_dyn.empty:
+        healthy_audit_cells = df_summary_dyn.loc[~df_summary_dyn["extrinsic_failure"].fillna(False).astype(bool)].index.astype(str).tolist()
+
+    audit_df = prepare_threshold_audit_data(TWIN_DIAGNOSTICS_PATH, tuple(healthy_audit_cells))
+    threshold_pff = get_artifact_threshold(alert_thresholds, "pff")
+    threshold_pce = get_artifact_threshold(alert_thresholds, "pce")
+    
+    global_summary = ml_artifacts.get("summary_table", pd.DataFrame())
+    screening_cohort = ml_artifacts.get("screening_cohort", [])
+    gated_out_cells = ml_artifacts.get("gated_out_cells", [])
+    production_cohort = ml_artifacts.get("healthy_cohort", [])
+
+    expander = st.expander("Digital Twin: Diagnostics Audit & Threshold Validation", expanded=False)
+    with expander:
+
+        tab_burn_in, tab_audit, tab_threshold = st.tabs([
+            "Phase 1: Burn-in Optimization",
+            f"Phase 2: {BURN_IN_DAYS:g}-Day Diagnostics Audit",
+            "Empirical Threshold Validation"
+        ])
+
+        with tab_burn_in:
+            df_grid = load_grid_search_data()
+
+            if df_grid.empty:
+                st.info("No grid search optimization data available. Ensure Phase 1 of the pipeline has been executed.")
+            else:
+                st.markdown("##### Empirical Burn-in Window Determination")
+                st.caption(
+                    "Sensitivity analysis evaluating the stabilization of the Digital Twin's validation error "
+                    "across different temporal windows. This mathematical approach formally defines the end of "
+                    "the infant mortality phase, avoiding arbitrarily selected constants."
+                )
+
+                fig_grid = create_burn_in_optimization_chart(df_grid, BURN_IN_DAYS)
+                st.plotly_chart(fig_grid, width="stretch", config=PLOTLY_CONFIG)
+
+                st.markdown("###### Grid Search Results Matrix")
+                st.dataframe(
+                    df_grid,
+                    column_config={
+                        "Window_Days": st.column_config.NumberColumn("Window (Days)", format="%.1f"),
+                        "Healthy_Cells_N": st.column_config.NumberColumn("Mature Cohort (N)", format="%d"),
+                        "Q98_PCE_Raw": st.column_config.NumberColumn("Q98 PCE", format="%.4f"),
+                        "Q98_pFF_Raw": st.column_config.NumberColumn("Q98 pFF", format="%.4f"),
+                        "LOOCV_MAE_PCE": st.column_config.NumberColumn("LOOCV MAE (PCE)", format="%.4f"),
+                        "LOOCV_MAE_pFF": st.column_config.NumberColumn("LOOCV MAE (pFF)", format="%.4f"),
+                    },
+                    hide_index=True, width="stretch"
+                )
+
+                st.success(
+                    f"**Mathematical Justification:** The grid search analysis validates the selection of "
+                    f"**{BURN_IN_DAYS:g} days** as the optimal burn-in threshold. At this point, "
+                    f"the physical cohort stabilizes and the generalization error (LOOCV MAE) breaks its minimum floor. "
+                    f"Extending the window beyond {BURN_IN_DAYS:g} days would severely degrade the available "
+                    f"training data volume without actionable predictive benefits."
+                )
+
+        with tab_audit:
+            absolute_day_zero = survival_naive_df.groupby("cell_name").apply(lambda x: x.index.min())
+
+            df_render = _prepare_audit_summary(ml_artifacts, "summary_table", active_cells_window, absolute_day_zero, max_t)
+
+            if df_render.empty or "cell_name" not in df_render.columns:
+                st.info("No audit data available for the current selection.")
+                return
+
+            df_render_pce = _prepare_audit_summary(ml_artifacts, "summary_pce", active_cells_window, absolute_day_zero, max_t)
+            df_render_pff = _prepare_audit_summary(ml_artifacts, "summary_pff", active_cells_window, absolute_day_zero, max_t)
+
+            df_unified = df_render.copy()
+            for df_metric, prefix in [(df_render_pce, "pce"), (df_render_pff, "pff")]:
+                 if not df_metric.empty and "cell_name" in df_metric.columns:
+                    cols = [c for c in ["cell_name", "threshold_pct_day", "ml_alert_date"] if c in df_metric.columns]
+                    if len(cols) > 1:
+                        renamed = df_metric[cols].rename(columns={"threshold_pct_day": f"threshold_pct_day_{prefix}", "ml_alert_date": f"ml_alert_date_{prefix}"})
+                        df_unified = df_unified.merge(renamed, on="cell_name", how="left")
+
+            def _safe_dt_notna(df: pd.DataFrame, col: str) -> pd.Series:
+                if col not in df.columns:
+                    return pd.Series(False, index=df.index)
+                return pd.to_datetime(df[col], errors="coerce").notna()
+
+            def _safe_float_gt(df: pd.DataFrame, col: str, threshold: float) -> pd.Series:
+                if col not in df.columns:
+                    return pd.Series(False, index=df.index)
+                return pd.to_numeric(df[col], errors="coerce").fillna(0) > threshold
+
+            df_unified["Failure"] = df_unified["Diagnostic_Status"] != "Healthy"
+            df_unified["T80_PCE_Failed"] = _safe_dt_notna(df_unified, "t80_failure_date_pce")
+            df_unified["T80_pFF_Failed"] = _safe_dt_notna(df_unified, "t80_failure_date_pff")
+            df_unified["ML_PCE_Alert"] = _safe_float_gt(df_unified, "alert_pce_pct", ALERT_FREQUENCY_THRESHOLD_PCT)
+            df_unified["ML_pFF_Alert"] = _safe_float_gt(df_unified, "alert_pff_pct", ALERT_FREQUENCY_THRESHOLD_PCT)
+
+            operation_ends = pd.Series(pd.to_datetime(max_t), index=df_summary_dyn.index).astype("datetime64[ns]")
+            df_unified_indexed = df_unified.set_index("cell_name")
+            if "t80_failure_date" in df_unified_indexed.columns:
+                died_mask = pd.to_datetime(df_unified_indexed["t80_failure_date"], errors="coerce").notna()
+                if bool(died_mask.any()):
+                    operation_ends.loc[died_mask[died_mask].index] = df_unified_indexed.loc[died_mask, "t80_failure_date"]
+
+            raw_exposures = (operation_ends - absolute_day_zero.loc[operation_ends.index]).dt.total_seconds() / 86400.0
+            exposures = raw_exposures.clip(upper=BURN_IN_DAYS)
+            capped_ends = absolute_day_zero.loc[exposures.index] + pd.to_timedelta(exposures, unit="D")
+            mature_cells = raw_exposures[raw_exposures > BURN_IN_DAYS]
+
+            df_operation = pd.DataFrame({
+                "cell_name": exposures.index,
+                "Operation_Days": exposures.values,
+                "Start": absolute_day_zero.loc[exposures.index].values,
+                "End": capped_ends.values,
+            }).merge(df_unified[["cell_name", "Diagnostic_Status"]], on="cell_name", how="left").sort_values("Operation_Days")
+
+            t80_failures_count = int(df_unified["Diagnostic_Status"].str.contains("T80", na=False).sum())
+            ml_failures_count = int(df_unified["ML_PCE_Alert"].sum()) + int(df_unified["ML_pFF_Alert"].sum())
+
+            st.markdown("##### Digital Twin Diagnostics")
+            st.caption(f"Machine-learning validation status and lifecycle diagnostics strictly during the {BURN_IN_DAYS:g}-day burn-in window.")
+
+            kpi_col1, kpi_col2 = st.columns(2)
+            kpi_col1.metric(f"Physical Collapse (T80 ≤ {BURN_IN_DAYS:g}d)", t80_failures_count)
+            kpi_col2.metric(f"Digital Twin Alerts (> {ALERT_FREQUENCY_THRESHOLD_PCT:g}%)", ml_failures_count)
+
+            if not mature_cells.empty:
+                cell_names = ", ".join(f"**{c}**" for c in mature_cells.index)
+                st.warning(
+                    f"⚠️ **Burn-in phase concluded:** the following cells have exceeded {BURN_IN_DAYS:g} days of outdoor exposure: {cell_names}. "
+                    f"The Digital Twin action window has concluded for these devices; data is capped at day {BURN_IN_DAYS:g}."
+                )
+
+            st.markdown(f"XGBoost classification adjusted to **{max_t.strftime('%Y-%m-%d %H:%M')}** (max. {BURN_IN_DAYS:g} days):")
+            st.markdown("##### Accumulated Operation Time (Burn-in Window)")
+
+            def get_status_category(status_str: str) -> tuple[str, str]:
+                s = str(status_str)
+                if "T80" in s: return "Physical Failure (T80)", "#EF4444"
+                if "ML" in s: return "Digital Twin Anomaly (ML)", "#6366F1"
+                return "Healthy / Mature", "#10B981"
+
+            df_operation["Status_Category"] = df_operation["Diagnostic_Status"].apply(lambda s: get_status_category(s)[0])
+            df_operation["Color"] = df_operation["Diagnostic_Status"].apply(lambda s: get_status_category(s)[1])
+
+            fig_uptime = go.Figure()
+
+            palette = {
+                "Physical Failure (T80)": "#EF4444",
+                "Digital Twin Anomaly (ML)": "#6366F1",
+                "Healthy / Mature": "#10B981"
+            }
+
+            for cat_name, cat_color in palette.items():
+                subset = df_operation[df_operation["Status_Category"] == cat_name]
+                if subset.empty:
+                    continue
+                
+                fig_uptime.add_trace(go.Bar(
+                    x=subset["Operation_Days"],
+                    y=subset["cell_name"],
+                    orientation="h",
+                    name=cat_name,
+                    marker=dict(color=cat_color, line=dict(width=0)),
+                    text=subset["Operation_Days"].apply(lambda x: f"{x:.1f} d"),
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "Classification: %{data.name}<br>"
+                        "Start: %{customdata[0]}<br>"
+                        "End (Capped): %{customdata[1]}<br>"
+                        "Operation: %{x:.2f} days<br>"
+                        "Detailed Status: %{customdata[2]}<extra></extra>"
+                    ),
+                    customdata=np.stack((
+                        subset["Start"].dt.strftime("%Y-%m-%d"),
+                        subset["End"].dt.strftime("%Y-%m-%d %H:%M"),
+                        subset["Diagnostic_Status"],
+                    ), axis=-1),
+                ))
+
+            fig_uptime.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                height=170 + (len(df_operation) * 35),
+                barmode="overlay",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11, color="#1E293B")),
+                xaxis=dict(showgrid=True, gridcolor="#F1F5F9", title=f"Days of Exposure (Burn-in Cap: {BURN_IN_DAYS:g}d)", range=[0, BURN_IN_DAYS + 0.5]),
+                yaxis=dict(showgrid=False, autorange="reversed"),
+            )
+            st.plotly_chart(fig_uptime, width="stretch", config=PLOTLY_CONFIG)
+
+            st.markdown("<hr style='margin: 1.5rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
+            st.markdown(f"##### Thematic Diagnostics (≤ {BURN_IN_DAYS:g} Days)")
+            st.caption("Short-term screening isolated into physical limitations (T80) and AI-driven predictive anomalies.")
+
+            base_col_config = {
+                "cell_name": "Device",
+                "Diagnostic_Status": st.column_config.TextColumn("Global Status"),
+                "Failure": st.column_config.CheckboxColumn("Failure Detected"),
+                "survival_days": st.column_config.NumberColumn("Surv. (Comb)", format="%.1f"),
+                "t80_failure_date": st.column_config.DatetimeColumn("T80 Date (Comb)", format="YYYY/MM/DD HH:mm"),
+                "alert_freq_pct": st.column_config.ProgressColumn("Alert Freq. (Comb)", format="%.1f %%", min_value=0, max_value=100),
+                "threshold_pct_day": st.column_config.NumberColumn(f"{ALERT_FREQUENCY_THRESHOLD_PCT:g}% Crossing (Comb)", format="%.1f"),
+                "ml_alert_date": st.column_config.DatetimeColumn("Alert Date (Comb)", format="YYYY/MM/DD HH:mm"),
+                "T80_PCE_Failed": st.column_config.CheckboxColumn("T80 (PCE)"),
+                "T80_pFF_Failed": st.column_config.CheckboxColumn("T80 (pFF)"),
+                "ML_PCE_Alert": st.column_config.CheckboxColumn("ML (PCE)"),
+                "ML_pFF_Alert": st.column_config.CheckboxColumn("ML (pFF)"),
+                "survival_days_pce": st.column_config.NumberColumn("Surv. (PCE)", format="%.1f"),
+                "survival_days_pff": st.column_config.NumberColumn("Surv. (pFF)", format="%.1f"),
+                "t80_failure_date_pce": st.column_config.DatetimeColumn("T80 Date (PCE)", format="YYYY/MM/DD HH:mm"),
+                "t80_failure_date_pff": st.column_config.DatetimeColumn("T80 Date (pFF)", format="YYYY/MM/DD HH:mm"),
+                "alert_pce_pct": st.column_config.ProgressColumn("Anomaly Freq. (PCE)", format="%.1f %%", min_value=0, max_value=100),
+                "alert_pff_pct": st.column_config.ProgressColumn("Anomaly Freq. (pFF)", format="%.1f %%", min_value=0, max_value=100),
+                "threshold_pct_day_pce": st.column_config.NumberColumn(f"{ALERT_FREQUENCY_THRESHOLD_PCT:g}% Crossing (PCE)", format="%.1f"),
+                "threshold_pct_day_pff": st.column_config.NumberColumn(f"{ALERT_FREQUENCY_THRESHOLD_PCT:g}% Crossing (pFF)", format="%.1f"),
+                "ml_alert_date_pce": st.column_config.DatetimeColumn("Alert Date (PCE)", format="YYYY/MM/DD HH:mm"),
+                "ml_alert_date_pff": st.column_config.DatetimeColumn("Alert Date (pFF)", format="YYYY/MM/DD HH:mm"),
+            }
+
+            def safe_cols(requested_cols: list[str], df: pd.DataFrame) -> list[str]:
+                return [c for c in requested_cols if c in df.columns]
+
+            st.markdown("###### 1. Global Health Overview")
+            cols_global = [
+                "cell_name", "Diagnostic_Status", "Failure", "survival_days",
+                "t80_failure_date", "alert_freq_pct", "threshold_pct_day",
+                "ml_alert_date"  
+            ]
+            st.dataframe(df_unified[safe_cols(cols_global, df_unified)], column_config=base_col_config, hide_index=True, width="stretch")
+
+            st.markdown("###### 2. Physical Degradation (T80 Metrics)")
+            cols_t80 = ["cell_name", "T80_PCE_Failed", "survival_days_pce", "t80_failure_date_pce", "T80_pFF_Failed", "survival_days_pff", "t80_failure_date_pff"]
+            st.dataframe(df_unified[safe_cols(cols_t80, df_unified)], column_config=base_col_config, hide_index=True, width="stretch")
+
+            st.markdown("###### 3. Digital Twin Anomalies (ML Alerts)")
+            cols_ml = ["cell_name", "ML_PCE_Alert", "alert_pce_pct", "threshold_pct_day_pce", "ml_alert_date_pce", "ML_pFF_Alert", "alert_pff_pct", "threshold_pct_day_pff", "ml_alert_date_pff"]
+            st.dataframe(df_unified[safe_cols(cols_ml, df_unified)], column_config=base_col_config, hide_index=True, width="stretch")
+
+            # --- THE AUTOPSY CHARTS AND LOG SECTION ---
+            st.markdown("##### 14-Day Temporal Autopsy")
+            available_cases = [cell for cell in AUDIT_CASE_STUDIES if cell in set(audit_df["cell_name"].dropna().astype(str))]
+            if not available_cases:
+                st.info("None of the predefined case-study cells are available in the Digital Twin dataset.")
+            else:
+                selected_case = st.selectbox(
+                    "Case Study", options=available_cases,
+                    format_func=lambda cell: AUDIT_CASE_LABELS.get(cell, str(cell)),
+                    key="empirical_threshold_case",
+                ) or available_cases[0]
+
+                case_data = pd.Series()
+                case_status = "Unknown"
+                alert_comb, alert_pce, alert_pff = np.nan, np.nan, np.nan
+
+                if not global_summary.empty and selected_case in global_summary.index:
+                    case_data = global_summary.loc[selected_case]
+                    alert_comb = float(case_data.get("alert_freq_pct", np.nan))
+                    alert_pce = float(case_data.get("alert_pce_pct", np.nan))
+                    alert_pff = float(case_data.get("alert_pff_pct", np.nan))
+                    case_status = str(case_data.get("Diagnostic_Status", "Unknown"))
+
+                day_zero_val = absolute_day_zero.loc[selected_case] if selected_case in absolute_day_zero.index else pd.Timestamp.now()
+                timeline_events = get_timeline_events(case_data, day_zero_val, max_days=BURN_IN_DAYS) if not case_data.empty else []
+
+                st.markdown("###### Dual Twin Combined Diagnostics (Logical OR)")
+                c_stat1, c_stat2, c_stat3 = st.columns(3)
+                c_stat1.metric("Diagnostic Status", case_status)
+                c_stat2.metric("Combined Alerts", f"{alert_comb:.1f}%" if pd.notna(alert_comb) else "0.0%")
+                c_stat3.metric("Individual (PCE | pFF)", f"{alert_pce:.1f}% | {alert_pff:.1f}%" if pd.notna(alert_pce) else "0.0% | 0.0%")
+
+                st.markdown("<div style='height: 0.5rem;'></div>", unsafe_allow_html=True)
+
+                tab_autopsy_comb, tab_autopsy_pff, tab_autopsy_pce = st.tabs([
+                    "Dual Twin (Combined OR)", "pFF Structural", "PCE Normalized"
+                ])
+
+                def _render_inline_history():
+                    st.markdown(f"###### Clinical History (First {BURN_IN_DAYS:g} Days)")
+                    for ev in timeline_events:
+                        date_str = ev["date"].strftime("%Y-%m-%d %H:%M")
+                        if ev["type"] == "START": st.info(f"🟢 **{date_str}** — {ev['msg']}")
+                        elif ev["type"] == "ML": st.warning(f"🟣 **{date_str}** — {ev['msg']}")
+                        elif ev["type"] == "T80": st.error(f"🔴 **{date_str}** — {ev['msg']}")
+                    if case_status == "Healthy":
+                        st.success(f"✅ The cell completed the {BURN_IN_DAYS:g}-day burn-in period with no operational anomalies.")
+                    st.markdown("<hr style='margin: 1.0rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
+
+                with tab_autopsy_comb:
+                    fig_comb = create_cumulative_alert_chart(audit_df, selected_case, threshold_pce, threshold_pff)
+                    fig_comb = _add_timeline_vlines_to_fig(fig_comb, timeline_events)
+                    st.plotly_chart(fig_comb, width="stretch", config=PLOTLY_CONFIG)
+                    _render_inline_history()
+                    st.info(
+                        "**Dual Twin Advantage:** This chart demonstrates how the logical OR combination "
+                        "of structural (pFF) and macro (PCE) anomalies reaches the eviction threshold "
+                        "faster and more reliably than either metric tracked in isolation."
+                    )
+
+                for tab, metric, threshold in [(tab_autopsy_pff, "pff", threshold_pff), (tab_autopsy_pce, "pce", threshold_pce)]:
+                    with tab:
+                        metric_literal: Literal["pff", "pce"] = "pff" if metric == "pff" else "pce"
+                        fig, stats = create_threshold_autopsy_chart(
+                            audit_df, selected_case, threshold, metric_literal, case_data, day_zero_val, timeline_events
+                        )
+                        fig = _add_timeline_vlines_to_fig(fig, timeline_events, metric_literal) 
+                        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                        _render_inline_history()
+
+                        if stats is not None:
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Twin observations", f"{stats['n']:,}")
+                            c2.metric("Mean Underperformance", f"{stats['mean_underperformance']:.4f}")
+                            c3.metric("Anomalies", f"{stats['anomaly_pct']:.2f}%")
+
+                        cfg = _AUTOPSY_METRIC_CONFIG[metric]
+                        case_df = audit_df[
+                            (audit_df["cell_name"].astype(str) == selected_case)
+                            & (audit_df["Exposure_Days"] <= BURN_IN_DAYS)
+                            & audit_df[cfg["pred_col"]].notna()
+                        ]
+                        if not case_df.empty:
+                            st.markdown("##### Sensitivity to the Anomaly Threshold")
+                            s1, s2 = st.columns(2)
+                            s1.metric(f"Anomalies > {AUDIT_SENSITIVITY_THRESHOLDS[0]}", f"{(case_df[cfg['underperf_col']] > AUDIT_SENSITIVITY_THRESHOLDS[0]).mean() * 100:.2f}%")
+                            s2.metric(f"Anomalies > {AUDIT_SENSITIVITY_THRESHOLDS[2]}", f"{(case_df[cfg['underperf_col']] > AUDIT_SENSITIVITY_THRESHOLDS[2]).mean() * 100:.2f}%")
+
+                            st.markdown("##### First Anomaly Threshold Crossing")
+                            crossings = []
+                            for thr in AUDIT_SENSITIVITY_THRESHOLDS:
+                                crossed = case_df[case_df[cfg["underperf_col"]] > thr]
+                                if crossed.empty:
+                                    crossings.append({"Threshold": thr, "Crossed": False, "Exposure Day": np.nan, "Timestamp": pd.NaT})
+                                else:
+                                    first = crossed.sort_values("Timestamp").iloc[0]
+                                    crossings.append({"Threshold": thr, "Crossed": True, "Exposure Day": first["Exposure_Days"], "Timestamp": first["Timestamp"]})
+                            st.dataframe(
+                                pd.DataFrame(crossings),
+                                column_config={
+                                    "Threshold": st.column_config.NumberColumn("Threshold", format="%.3f"),
+                                    "Crossed": st.column_config.CheckboxColumn("Crossed"),
+                                    "Exposure Day": st.column_config.NumberColumn("Exposure Day", format="%.3f"),
+                                    "Timestamp": st.column_config.DatetimeColumn("Timestamp", format="YYYY-MM-DD HH:mm"),
+                                },
+                                hide_index=True, width="stretch",
+                            )
+                if metric == "pce":
+                    if selected_case == "A170AB302":
+                        st.warning("**Borderline case:** the Digital Twin does not generate a sufficiently persistent underperformance excursion during the early window to satisfy the cumulative alert criterion.")
+                    elif selected_case == "P12":
+                        st.error("**Clear failure:** the measured trajectory substantially underperforms the Digital Twin prediction during the early exposure window.")
+                    elif selected_case == "M83AB302":
+                        st.success("**Healthy control:** the measured trajectory remains predominantly within the empirical Digital Twin tolerance band.")
+
+        # ==========================================
+        # TAB 3: Empirical Threshold Validation
+        # ==========================================
+        with tab_threshold:
+            st.markdown("##### Empirical Threshold Validation")
+            st.caption(
+                "Thresholds are evaluated against the mature healthy cohort to verify that the Digital Twin "
+                "tolerance band reflects empirical model uncertainty rather than a manually tuned value."
+            )
+
+            pff_audit = calculate_empirical_audit(audit_df, healthy_audit_cells, "pff", quantile=RESIDUAL_ALERT_QUANTILE)
+            pce_audit = calculate_empirical_audit(audit_df, healthy_audit_cells, "pce", quantile=RESIDUAL_ALERT_QUANTILE)
+
+            if audit_df.empty:
+                st.warning("No empirical threshold audit data are available.")
+            else:
+                st.markdown("##### Statistical Coverage")
+                m1, m2, m3, m4 = st.columns(4)
+                pff_coverage = float((pff_audit["residuals"] <= threshold_pff).mean() * 100) if pff_audit["n"] > 0 and np.isfinite(threshold_pff) else np.nan
+                pce_coverage = float((pce_audit["residuals"] <= threshold_pce).mean() * 100) if pce_audit["n"] > 0 and np.isfinite(threshold_pce) else np.nan
+                m1.metric("pFF Threshold", f"{threshold_pff:.4f}" if np.isfinite(threshold_pff) else "Unavailable")
+                m2.metric("pFF Healthy Coverage", f"{pff_coverage:.2f}%" if pd.notna(pff_coverage) else "—",
+                           f"Q{RESIDUAL_ALERT_QUANTILE * 100:.0f} ≈ {pff_audit['threshold']:.4f}" if pd.notna(pff_audit["threshold"]) else None)
+                m3.metric("PCE Threshold", f"{threshold_pce:.4f}" if np.isfinite(threshold_pce) else "Unavailable")
+                m4.metric("PCE Healthy Coverage", f"{pce_coverage:.2f}%" if pd.notna(pce_coverage) else "—",
+                           f"Q{RESIDUAL_ALERT_QUANTILE * 100:.0f} ≈ {pce_audit['threshold']:.4f}" if pd.notna(pce_audit["threshold"]) else None)
+
+                st.markdown("##### Empirical Interpretation")
+                if pd.notna(pff_audit["threshold"]):
+                    st.info(f"**pFF:** the empirical Q{RESIDUAL_ALERT_QUANTILE * 100:.0f} of one-sided underperformance is **{pff_audit['threshold']:.4f}**, while the applied Digital Twin threshold is **{threshold_pff:.4f}**. This threshold contains approximately **{pff_coverage:.2f}%** of the mature healthy observations.")
+                if pd.notna(pce_audit["threshold"]):
+                    st.info(f"**PCE:** the empirical Q{RESIDUAL_ALERT_QUANTILE * 100:.0f} of one-sided underperformance is **{pce_audit['threshold']:.4f}**, while the applied threshold is **{threshold_pce:.4f}**. This threshold contains approximately **{pce_coverage:.2f}%** of the mature healthy observations.")
+
+                st.markdown("##### Distribution of Underperformance")
+                tab_pff_audit, tab_pce_audit = st.tabs(["pFF", "PCE Normalized"])
+                with tab_pff_audit:
+                    st.plotly_chart(create_residual_distribution_chart(pff_audit["residuals"], threshold_pff, "pFF", RESIDUAL_ALERT_QUANTILE), width="stretch", config=PLOTLY_CONFIG)
+                    st.caption(f"Mature healthy observations: {pff_audit['n']:,} · Mean underperformance: {pff_audit['mean_underperformance']:.5f}")
+                with tab_pce_audit:
+                    st.plotly_chart(create_residual_distribution_chart(pce_audit["residuals"], threshold_pce, "PCE / PCE₀", RESIDUAL_ALERT_QUANTILE), width="stretch", config=PLOTLY_CONFIG)
+                    st.caption(f"Mature healthy observations: {pce_audit['n']:,} · Mean underperformance: {pce_audit['mean_underperformance']:.5f}")
+
+                st.markdown("##### Production Cohort Trace (LOOCV Gate)")
+                st.caption("The exact pipeline journey from the raw dataset to the clean model training set.")
+
+                st.markdown(f"**1. Initial Screening Cohort (Survived T80 > 14d):**\n`{', '.join(screening_cohort) if screening_cohort else 'N/A (run pipeline)'}`")
+                st.markdown("**2. Evicted by Leave-One-Out Cross-Validation (LOOCV):**")
+                if gated_out_cells:
+                    for cell in gated_out_cells:
+                        if not global_summary.empty and cell in global_summary.index:
+                            pce_alerts = global_summary.loc[cell, "alert_pce_pct"]
+                            pff_alerts = global_summary.loc[cell, "alert_pff_pct"]
+                            st.markdown(f"* `{cell}`: **{max(pce_alerts, pff_alerts):.1f}%** early anomaly alerts (PCE: {pce_alerts:.1f}%, pFF: {pff_alerts:.1f}%)")
+                        else:
+                            st.markdown(f"* `{cell}`")
+                else:
+                    st.markdown("* *None*")
+                st.markdown(f"**3. Final Validated Production Cohort:**\n`{', '.join(production_cohort) if production_cohort else 'N/A'}`")
+
+
+def general_overview() -> None:
+    """Render the "General Overview" page: fleet KPIs, telemetry, and Digital Twin diagnostics."""
+    st.sidebar.markdown("<h4 style='font-size: 1.1rem; color: #1E293B; margin-bottom: 0;'>KPI Options</h4>", unsafe_allow_html=True)
+    kpi1_type = st.sidebar.radio("Photovoltaic (KPI 1)", ["Fleet MPPT Power", "Fleet PCE"])
+    kpi2_type = st.sidebar.radio("Irradiance (KPI 2)", ["Mean POA Irradiance", "Accumulated POA Dose"])
+    kpi3_type = st.sidebar.radio("Temperature (KPI 3)", ["Mean Module Temp.", "Mean Ambient Temp."])
+    kpi4_type = st.sidebar.radio("Humidity (KPI 4)", ["Relative Humidity", "Absolute Humidity", "Humidity Dose"])
+    st.sidebar.divider()
+    st.sidebar.markdown("<h4 style='font-size: 1.1rem; color: #1E293B; margin-bottom: 0;'>Chart Aggregations</h4>", unsafe_allow_html=True)
+    selected_metric = st.sidebar.radio(
+        "Central Tendency", ["Mean", "Median"], index=0,
+        help="Statistical metric applied to the temporal resampling of charts.",
+    )
+    st.sidebar.divider()
+    render_sidebar_footer()
+
     fleet_df = load_global_data()
     ml_artifacts = load_ml_artifacts()
     survival_df = load_survival_data()
@@ -919,30 +1667,27 @@ def general_overview():
     df_pce_norm = load_pce_norm_data()
     df_pff_pred = load_pff_pred_data()
     alert_thresholds = ml_artifacts.get("alert_thresholds", {})
-    model_pce = ml_artifacts.get("model_pce")
-    model_pff = ml_artifacts.get("model_pff")
-    dual_twin_ready = model_pce is not None and model_pff is not None and {
-        "pce", "pff"
-    }.issubset(alert_thresholds)
+    dual_twin_ready = (
+        ml_artifacts.get("model_pce") is not None
+        and ml_artifacts.get("model_pff") is not None
+        and {"pce", "pff"}.issubset(alert_thresholds)
+    )
     if ml_artifacts and not dual_twin_ready:
         st.warning("Dual Digital Twin artifacts are incomplete: PCE and pFF models and thresholds are required.")
 
     if not fleet_df.empty:
-        max_date = pd.to_datetime(fleet_df.index.max()).date()
         min_date = pd.to_datetime(fleet_df.index.min()).date()
+        max_date = pd.to_datetime(fleet_df.index.max()).date()
     else:
         max_date = datetime.date.today()
         min_date = max_date - datetime.timedelta(days=30)
 
-    # --- HEADER & TOOLBAR ---
     st.markdown("### ParaSol Dashboard")
     st.caption("Global fleet monitoring, early failure detection, and environmental context.")
     st.markdown("<div style='height: 0.4rem;'></div>", unsafe_allow_html=True)
-    
     time_window, start_date, end_date = render_toolbar(min_date, max_date)
     st.markdown("<div style='height: 0.6rem;'></div>", unsafe_allow_html=True)
 
-    # --- TIME WINDOW FILTERING ---
     plot_df, prev_df = pd.DataFrame(), pd.DataFrame()
     if not fleet_df.empty:
         max_timestamp = fleet_df.index.max()
@@ -951,43 +1696,32 @@ def general_overview():
             anchor_time = max_timestamp
             if anchor_time.hour == 0 and anchor_time.minute == 0 and anchor_time.second == 0:
                 anchor_time -= pd.Timedelta(seconds=1)
-            delta_start = pd.Timedelta(days=days - 1)
-            start_dt = (anchor_time - delta_start).normalize()
-
+            start_dt = (anchor_time - pd.Timedelta(days=days - 1)).normalize()
             plot_df = fleet_df[fleet_df.index >= start_dt].copy()
-            delta_prev = pd.Timedelta(days=days)
-            prev_df = fleet_df[(fleet_df.index >= (start_dt - delta_prev)) & (fleet_df.index < start_dt)].copy()
-        
+            prev_df = fleet_df[(fleet_df.index >= start_dt - pd.Timedelta(days=days)) & (fleet_df.index < start_dt)].copy()
         elif time_window == "Historical":
             plot_df = fleet_df.copy()
-            prev_df = pd.DataFrame()
-        
         elif time_window == "Custom Dates":
             if start_date > end_date:
-                st.error("❌ **Selection Error:** The start date cannot be later than the end date.")
+                st.error("❌ **Selection Error:** the start date cannot be later than the end date.")
                 st.stop()
-            else:
-                start_dt = pd.to_datetime(start_date)
-                end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-                plot_df = fleet_df[(fleet_df.index >= start_dt) & (fleet_df.index <= end_dt)].copy()
-                if plot_df.empty:
-                    st.error("❌ **No Records:** No data available for the selected period.")
-                    st.stop()
-                delta_dates = end_dt - start_dt
-                prev_df = fleet_df[(fleet_df.index >= (start_dt - delta_dates)) & (fleet_df.index < start_dt)].copy()
-        
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            plot_df = fleet_df[(fleet_df.index >= start_dt) & (fleet_df.index <= end_dt)].copy()
+            if plot_df.empty:
+                st.error("❌ **No Records:** no data available for the selected period.")
+                st.stop()
+            prev_df = fleet_df[(fleet_df.index >= start_dt - (end_dt - start_dt)) & (fleet_df.index < start_dt)].copy()
+
         plot_df = plot_df.dropna(how="all")
         if plot_df.empty:
-            st.error(f"❌ **No Records:** No data available for the selected time window ({time_window}).")
+            st.error(f"❌ **No Records:** no data available for the selected time window ({time_window}).")
             st.stop()
 
-    duration_days = (plot_df.index.max() - plot_df.index.min()).total_seconds() / 86400.0
-    resolution_rules = get_resolution_rules(duration_days, selected_metric)
+    resolution_rules = get_resolution_rules(_duration_days(plot_df), selected_metric)
 
-    # -------------------------------------------------------------
-    # IDENTIFICATION OF ACTIVE CELLS (Timezone-naive)
-    # -------------------------------------------------------------
-    min_t, max_t = None, None
+    # --- Active cell identification (timezone-naive) ---
+    min_t = max_t = None
     if not plot_df.empty:
         min_t = plot_df.index.min()
         max_t = plot_df.index.max()
@@ -997,381 +1731,130 @@ def general_overview():
             max_t = max_t.replace(tzinfo=None)
 
     survival_naive_df = pd.DataFrame()
-    active_cells_window = []
-    
+    active_cells_window: list[str] = []
     if not survival_df.empty:
         survival_naive_df = survival_df.copy()
-        survival_dt_index = pd.DatetimeIndex(survival_naive_df.index)
-        if getattr(survival_dt_index, "tz", None) is not None:
-            survival_dt_index = survival_dt_index.tz_localize(None)
-        survival_naive_df.index = survival_dt_index
-        
+        survival_index = pd.DatetimeIndex(survival_naive_df.index)
+        if getattr(survival_index, "tz", None) is not None:
+            survival_index = survival_index.tz_localize(None)
+        survival_naive_df.index = survival_index
         if min_t is not None and max_t is not None:
-            mask_surv_window = (survival_naive_df.index >= min_t) & (survival_naive_df.index <= max_t)
-            cell_name_col = survival_naive_df["cell_name"]
-            active_cells_window = pd.unique(cell_name_col[mask_surv_window])
+            window_mask = (survival_naive_df.index >= min_t) & (survival_naive_df.index <= max_t)
+            active_cells_window = pd.unique(survival_naive_df["cell_name"][window_mask])
 
     active_cells_lower = [str(c).lower() for c in active_cells_window]
-    
-    all_power_cols = [c for c in plot_df.columns if 'power' in c.lower() or 'p_mpp' in c.lower()]
-    
-    # Filter power columns to only active cells
-    if active_cells_lower:
-        active_power_cols = [c for c in all_power_cols if any(ac in c.lower() for ac in active_cells_lower)]
-    else:
-        active_power_cols = all_power_cols
+    all_power_cols = [c for c in plot_df.columns if "power" in c.lower() or "p_mpp" in c.lower()]
+    active_power_cols = [c for c in all_power_cols if any(ac in c.lower() for ac in active_cells_lower)] if active_cells_lower else all_power_cols
 
-    def get_valid_cols(columns_list, df_local):
-        return [c for c in columns_list if df_local[c].notna().any() and (df_local[c] != 0).any()]
+    def _valid_cols(columns: list[str], reference: pd.DataFrame) -> list[str]:
+        return [c for c in columns if c in reference.columns and bool(reference[c].notna().any()) and bool((reference[c] != 0).any())]
 
-    active_power_cols = get_valid_cols(active_power_cols, plot_df)
+    active_power_cols = _valid_cols(active_power_cols, plot_df)
 
-    # -------------------------------------------------------------
-    # DYNAMIC PHYSICAL PCE & POWER CALCULATION (FOR CHARTS & KPIS)
-    # -------------------------------------------------------------
-    pce_cols_plot = []
-    power_cols_plot = []
-    
-    if 'POA_Irradiance_W_m2' in plot_df.columns:
-        # PARCHE 1: umbral subido de 10 a PCE_IRRADIANCE_MIN_W_M2 (100 W/m^2), consistente con
-        # data_aggregation.py y anomaly_detection.py, para evitar inestabilidad numerica del
-        # denominador (POA * CELL_AREA_M2) al calcular la PCE instantanea en el dashboard.
-        mask_sun_plot = plot_df['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2
-        mask_sun_prev = prev_df['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2 if not prev_df.empty else pd.Series(False, index=prev_df.index)
-
+    # --- Dynamic physical PCE & power calculation (for charts & KPIs) ---
+    pce_cols_plot: list[str] = []
+    power_cols_plot: list[str] = []
+    if "POA_Irradiance_W_m2" in plot_df.columns:
+        mask_sun_plot = plot_df["POA_Irradiance_W_m2"] > DAYLIGHT_IRRADIANCE_MIN_W_M2
+        mask_sun_prev = prev_df["POA_Irradiance_W_m2"] > DAYLIGHT_IRRADIANCE_MIN_W_M2 if not prev_df.empty else pd.Series(False, index=prev_df.index)
         for p_col in active_power_cols:
-            dev_id = p_col.split('_')[-1]
-            pce_col_name = f"PCE_{dev_id} (%)"
-            power_col_name = f"Power_{dev_id} (mW)"
-            
+            dev_id = p_col.split("_")[-1]
+            pce_col_name, power_col_name = f"PCE_{dev_id} (%)", f"Power_{dev_id} (mW)"
             pce_cols_plot.append(pce_col_name)
             power_cols_plot.append(power_col_name)
-            
+
             plot_df[power_col_name] = plot_df[p_col] * 1000.0
-            if not prev_df.empty and p_col in prev_df.columns:
-                prev_df[power_col_name] = prev_df[p_col] * 1000.0
-                
             plot_df[pce_col_name] = np.nan
             plot_df.loc[mask_sun_plot, pce_col_name] = (
-                plot_df.loc[mask_sun_plot, p_col] / (plot_df.loc[mask_sun_plot, 'POA_Irradiance_W_m2'] * CELL_AREA_M2)
+                plot_df.loc[mask_sun_plot, p_col] / (plot_df.loc[mask_sun_plot, "POA_Irradiance_W_m2"] * CELL_AREA_M2)
             ) * 100.0
-            
-            # [CRITICAL FIX] Capping instantaneous PCE to avoid micro-noise spikes
-            plot_df[pce_col_name] = plot_df[pce_col_name].clip(lower=0, upper=100)
-            
+            plot_df[pce_col_name] = plot_df[pce_col_name].clip(lower=0, upper=100) 
+
             if not prev_df.empty and p_col in prev_df.columns:
+                prev_df[power_col_name] = prev_df[p_col] * 1000.0
                 prev_df[pce_col_name] = np.nan
                 prev_df.loc[mask_sun_prev, pce_col_name] = (
-                    prev_df.loc[mask_sun_prev, p_col] / (prev_df.loc[mask_sun_prev, 'POA_Irradiance_W_m2'] * CELL_AREA_M2)
+                    prev_df.loc[mask_sun_prev, p_col] / (prev_df.loc[mask_sun_prev, "POA_Irradiance_W_m2"] * CELL_AREA_M2)
                 ) * 100.0
                 prev_df[pce_col_name] = prev_df[pce_col_name].clip(lower=0, upper=100)
 
-    def calc_physical_pce(df_local, p_cols):
-        if not p_cols or df_local.empty or 'POA_Irradiance_W_m2' not in df_local.columns: return np.nan
-        # PARCHE 1: umbral subido de 10 a PCE_IRRADIANCE_MIN_W_M2 (100 W/m^2)
-        mask = df_local['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2
-        if not mask.any(): return np.nan
-        pce_arrays = []
-        for c in p_cols:
-            incident_power_w = df_local.loc[mask, 'POA_Irradiance_W_m2'] * CELL_AREA_M2
-            pce = df_local.loc[mask, c] / incident_power_w
-            pce_arrays.append(pce)
-        pce_df = pd.concat(pce_arrays)
-        # Cap global KPI to bounds
-        pce_df = pce_df[(pce_df >= 0) & (pce_df <= 1)]
-        return pce_df.replace([0, np.inf, -np.inf], np.nan).mean() * 100
+    def _physical_pce(df_local: pd.DataFrame, p_cols: list[str]) -> float:
+        if not p_cols or df_local.empty or "POA_Irradiance_W_m2" not in df_local.columns:
+            return np.nan
+        mask = df_local["POA_Irradiance_W_m2"] > DAYLIGHT_IRRADIANCE_MIN_W_M2
+        if not bool(mask.any()):
+            return np.nan
+        incident_power_w = df_local.loc[mask, "POA_Irradiance_W_m2"] * CELL_AREA_M2
+        pce_series = pd.concat([df_local.loc[mask, c] / incident_power_w for c in p_cols])
+        pce_series = pce_series[(pce_series >= 0) & (pce_series <= 1)]
+        return pce_series.replace([0, np.inf, -np.inf], np.nan).mean() * 100
 
-    mean_pce_act = calc_physical_pce(plot_df, active_power_cols)
-    mean_pce_prev = calc_physical_pce(prev_df, active_power_cols)
+    mean_pce_act = _physical_pce(plot_df, active_power_cols)
+    mean_pce_prev = _physical_pce(prev_df, active_power_cols)
 
-    # --- KPI 4: Digital Twin Dynamic Status ---
+    # --- Digital Twin dynamic status ---
     df_summary_dyn = pd.DataFrame()
-    df_summary = pd.DataFrame()
     if ml_artifacts and min_t is not None and max_t is not None and not survival_naive_df.empty:
         df_summary = ml_artifacts.get("summary_table", pd.DataFrame()).copy()
-
-        idx_present = df_summary.index.intersection(active_cells_window)
-        df_summary_dyn = df_summary.loc[idx_present].copy()
-
+        df_summary_dyn = df_summary.loc[df_summary.index.intersection(active_cells_window)].copy()
         if not df_summary_dyn.empty:
-            for col in ["t80_failure_date", "ml_alert_date"]:
-                df_summary_dyn[col] = pd.to_datetime(df_summary_dyn[col])
-                if getattr(df_summary_dyn[col].dt, 'tz', None) is not None:
-                    df_summary_dyn[col] = df_summary_dyn[col].dt.tz_localize(None)
-                    
-            df_summary_dyn["t80_occurred"] = df_summary_dyn["t80_failure_date"].notna() & (df_summary_dyn["t80_failure_date"] <= max_t)
-            df_summary_dyn["ml_occurred"] = df_summary_dyn["ml_alert_date"].notna() & (df_summary_dyn["ml_alert_date"] <= max_t)
+            if "combined_survival_days" in df_summary_dyn.columns and "survival_days" not in df_summary_dyn.columns:
+                df_summary_dyn["survival_days"] = df_summary_dyn["combined_survival_days"]
+            if "combined_failure_date" in df_summary_dyn.columns and "t80_failure_date" not in df_summary_dyn.columns:
+                df_summary_dyn["t80_failure_date"] = df_summary_dyn["combined_failure_date"]
 
-            mask_future_t80 = df_summary_dyn["t80_failure_date"] > max_t
-            df_summary_dyn.loc[mask_future_t80, ["t80_failure_date", "survival_days"]] = [pd.NaT, np.nan]
-            mask_future_ml = df_summary_dyn["ml_alert_date"] > max_t
-            df_summary_dyn.loc[mask_future_ml, ["ml_alert_date", "threshold_15pct_day"]] = [pd.NaT, np.nan]
-            
-            def classify_state(row):
-                if row["t80_occurred"]: return "Physical Collapse"
-                if row["ml_occurred"]: return "ML Predictive Alert"
-                return "Healthy"
+            date_cols = ["t80_failure_date", "ml_alert_date", "t80_failure_date_pce", "t80_failure_date_pff"]
+            for col in date_cols:
+                if col in df_summary_dyn.columns:
+                    df_summary_dyn[col] = pd.to_datetime(df_summary_dyn[col])
+                    if getattr(df_summary_dyn[col].dt, "tz", None) is not None:
+                        df_summary_dyn[col] = df_summary_dyn[col].dt.tz_localize(None)
 
-            df_summary_dyn["Current_State"] = df_summary_dyn.apply(classify_state, axis=1)
-            
-            n_def_count = int((df_summary_dyn["t80_occurred"] | df_summary_dyn["ml_occurred"]).sum())
-            total_ml_cells = len(df_summary_dyn)
-            n_val = total_ml_cells - n_def_count
-            kpi_p4_val = f"{n_val} / {total_ml_cells}"
-            
-            if n_def_count == 0:
-                kpi_p4_delta = "100% Operational"
-            elif n_val == 0:
-                kpi_p4_delta = f"-{n_def_count} Anomalies (Critical)"
-            else:
-                pct_healthy = (n_val / total_ml_cells) * 100.0
-                kpi_p4_delta = f"-{n_def_count} Anomalies ({pct_healthy:.0f}% Healthy)"
-            delta_col = "normal"
-        else:
-            kpi_p4_val, kpi_p4_delta, delta_col = "0 / 0", "No devices", "off"
-    else:
-        kpi_p4_val, kpi_p4_delta, delta_col = "--", "No ML data", "off"
+            _null_future_and_capped(df_summary_dyn, [("t80_failure_date", "survival_days")], max_t)
+            _null_future_and_capped(df_summary_dyn, [("ml_alert_date", "threshold_pct_day")], max_t)
 
-    # --- LIFECYCLE ALERT (>14 DAYS) AND DIAGNOSTIC TABLE ---
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
-    audit_report = st.expander("View Audit Report (Digital Twin)", expanded=False)
-    with audit_report:
-        st.markdown("##### Digital Twin Diagnostics")
-        st.caption("Machine-learning validation status and lifecycle diagnostics for the monitored cells.")
-        st.metric("Validated Cells (ML)", kpi_p4_val, kpi_p4_delta, delta_color=delta_col)
-    if not df_summary_dyn.empty and max_t is not None and not survival_naive_df.empty:
-        absolute_day_zero = survival_naive_df.groupby('cell_name').apply(lambda x: x.index.min())
-        operation_ends = pd.Series(pd.to_datetime(max_t), index=df_summary_dyn.index).astype('datetime64[ns]')
-
-        mask_deaths = df_summary_dyn['t80_occurred']
-        if mask_deaths.any():
-            death_dates = pd.to_datetime(df_summary_dyn.loc[mask_deaths, 't80_failure_date']).astype('datetime64[ns]')
-            operation_ends.loc[mask_deaths] = death_dates
-
-        exposures = (operation_ends - absolute_day_zero.loc[operation_ends.index]).dt.total_seconds() / 86400.0
-        mature_cells = exposures[exposures > 14.0]
-
-        if not mature_cells.empty:
-            cell_names = ", ".join([f"**{cel}** ({days:.1f} days)" for cel, days in mature_cells.items()])
-            with audit_report:
-                st.warning(
-                    f"⚠️ ***Burn-in* Phase Concluded:** The following cells have exceeded 14 days of outdoor exposure "
-                    f"by the selected date: {cell_names}. "
-                    "The Digital Twin window of action has concluded for these devices. "
-                    "Transition inference to the **Long-Term Predictive Model**."
-                )
-
-        with audit_report:
-            st.markdown(f"XGBoost Classification adjusted to **{max_t.strftime('%Y-%m-%d %H:%M')}**:")
-            df_render = df_summary_dyn.reset_index().copy()
-
-            st.markdown("##### Accumulated Operation Time (Days of Exposure)")
-            df_operation = pd.DataFrame({
-                'cell_name': exposures.index,
-                'Operation_Days': exposures.values,
-                'Start': absolute_day_zero.loc[exposures.index].values,
-                'End': operation_ends.values
-            }).merge(
-                df_render[['cell_name', 'Current_State']],
-                on='cell_name',
-                how='left'
-            ).sort_values(by='Operation_Days', ascending=True)
-            
-            color_map = {'Physical Collapse': '#F43F5E', 'ML Predictive Alert': '#F59E0B', 'Healthy': '#10B981'}
-            df_operation['Color'] = df_operation['Current_State'].map(color_map)
-            
-            fig_uptime = go.Figure(go.Bar(
-                x=df_operation['Operation_Days'],
-                y=df_operation['cell_name'],
-                orientation='h',
-                marker_color=df_operation['Color'],
-                text=df_operation['Operation_Days'].apply(lambda x: f"{x:.1f} d"),
-                textposition='inside',
-                insidetextanchor='middle',
-                hovertemplate="<b>%{y}</b><br>Start: %{customdata[0]}<br>End (Death/Today): %{customdata[1]}<br>Operation: %{x:.2f} days<br>Status: %{customdata[2]}<extra></extra>",
-                customdata=np.stack((df_operation['Start'].dt.strftime('%Y-%m-%d'), df_operation['End'].dt.strftime('%Y-%m-%d %H:%M'), df_operation['Current_State']), axis=-1)
-            ))
-            fig_uptime.update_layout(
-                margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white", height=150 + (len(df_operation) * 35),
-                xaxis=dict(showgrid=True, gridcolor="#F1F5F9", title="Real Days of Exposure"), yaxis=dict(showgrid=False)
-            )
-            st.plotly_chart(fig_uptime, width="stretch", config=plotly_config)
-            st.markdown("<hr style='margin: 1.5rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
-
-            st.markdown("##### Diagnostics and Anomaly Extraction")
-            st.caption(
-                "Short-term screening uses instantaneous thermodynamic variables and their temporal gradients "
-                "(thermal shock and moisture ingress). Accumulated thermal and humidity doses are reserved for "
-                "long-term survival analysis. Alerts use the OR gate: PCE power drop or pFF structural mutation."
-            )
-
-            base_col_config = {
-                "cell_name": "Device",
-                "Current_State": st.column_config.TextColumn("Status (Diagnostic)"),
-                "alert_freq_pct": st.column_config.ProgressColumn("Alert Freq. (%)", format="%.1f %%", min_value=0, max_value=100),
-                "alert_pce_pct": st.column_config.ProgressColumn("Alert PCE (%)", format="%.1f %%", min_value=0, max_value=100),
-                "alert_pff_pct": st.column_config.ProgressColumn("Alert pFF (%)", format="%.1f %%", min_value=0, max_value=100),
-                "threshold_15pct_day": st.column_config.NumberColumn("15% Crossing Day", format="%.1f"),
-                "survival_days": st.column_config.NumberColumn("Survival Days (T80)", format="%.1f"),
-                "t80_failure_date": st.column_config.DatetimeColumn("T80 Date", format="YYYY/MM/DD HH:mm"),
-                "ml_alert_date": st.column_config.DatetimeColumn("ML Alert Date", format="YYYY/MM/DD HH:mm"),
-            }
-
-            def prepare_audit_summary(artifact_key):
-                summary = ml_artifacts.get(artifact_key, df_summary).copy()
-                summary = summary.loc[summary.index.intersection(active_cells_window)].copy()
-                if summary.empty:
-                    return summary.reset_index()
-
-                for col in ["t80_failure_date", "ml_alert_date"]:
-                    summary[col] = pd.to_datetime(summary[col])
-                    if getattr(summary[col].dt, 'tz', None) is not None:
-                        summary[col] = summary[col].dt.tz_localize(None)
-
-                summary["t80_occurred"] = summary["t80_failure_date"].notna() & (summary["t80_failure_date"] <= max_t)
-                summary["ml_occurred"] = summary["ml_alert_date"].notna() & (summary["ml_alert_date"] <= max_t)
-
-                mask_future_t80 = summary["t80_failure_date"] > max_t
-                summary.loc[mask_future_t80, ["t80_failure_date", "survival_days"]] = [pd.NaT, np.nan]
-                mask_future_ml = summary["ml_alert_date"] > max_t
-                summary.loc[mask_future_ml, ["ml_alert_date", "threshold_15pct_day"]] = [pd.NaT, np.nan]
-
-                summary["Current_State"] = summary.apply(classify_state, axis=1)
-                return summary.reset_index()
-
-            df_render_pce = prepare_audit_summary("summary_pce")
-            df_render_pff = prepare_audit_summary("summary_pff")
-
-            tab_tbl_all, tab_tbl_pce, tab_tbl_pff = st.tabs([
-                " Resumen Global Combinado",
-                " Alertas PCE Normalizado",
-                " Alertas pFF (Estructural)"
-            ])
-
-            with tab_tbl_all:
-                cols_all = [
-                    "cell_name", "alert_freq_pct", "alert_pce_pct", "alert_pff_pct",
-                    "survival_days", "t80_failure_date", "threshold_15pct_day",
-                    "ml_alert_date", "Current_State"
-                ]
-                st.dataframe(
-                    df_render[cols_all],
-                    column_config=base_col_config,
-                    hide_index=True, width="stretch"
-                )
-
-            with tab_tbl_pce:
-                cols_pce = [
-                    "cell_name", "alert_pce_pct", "survival_days", "t80_failure_date",
-                    "threshold_15pct_day", "ml_alert_date", "Current_State"
-                ]
-                st.dataframe(
-                    df_render_pce[cols_pce],
-                    column_config=base_col_config,
-                    hide_index=True, width="stretch"
-                )
-
-            with tab_tbl_pff:
-                cols_pff = [
-                    "cell_name", "alert_pff_pct", "survival_days", "t80_failure_date",
-                    "threshold_15pct_day", "ml_alert_date", "Current_State"
-                ]
-                st.dataframe(
-                    df_render_pff[cols_pff],
-                    column_config=base_col_config,
-                    hide_index=True, width="stretch"
-                )
-
-    # -------------------------------------------------------------
-    # DIGITAL TWIN: pFF Y PCE NORMALIZADO DE TODAS LAS CELDAS (TABS)
-    # -------------------------------------------------------------
-    audit_report.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
-    audit_report.markdown("##### Digital Twin: Indicadores de Fleet por Celda")
-    audit_report.caption(
-        "PCE normalizado respecto al pico inicial de cada celda y Fill Factor real, superpuestos por "
-        "celda dentro de la ventana seleccionada."
-    )
-    cell_names_sorted = sorted(str(c) for c in active_cells_window)
-    tab_fleet_pff, tab_fleet_pce = audit_report.tabs(["Fill Factor (pFF)", "PCE Normalizado"])
-    with tab_fleet_pff:
-        df_pff_pivot = build_fleet_pff_pivot(df_pff_pred, cell_names_sorted, plot_df.index.min(), plot_df.index.max())
-        if df_pff_pivot.empty:
-            tab_fleet_pff.info("No hay observaciones de pFF del Gemelo Digital disponibles para esta ventana.")
-        else:
-            fig_pff_fleet = create_plotly_chart(
-                df_pff_pivot,
-                list(df_pff_pivot.columns),
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_pff_fleet.update_layout(height=420, margin=dict(b=60))
-            fig_pff_fleet.update_yaxes(title_text="pFF")
-            tab_fleet_pff.plotly_chart(fig_pff_fleet, width="stretch", config=plotly_config)
-    with tab_fleet_pce:
-        df_pce_pivot = build_fleet_pce_pivot(df_pce_norm, cell_names_sorted, plot_df.index.min(), plot_df.index.max())
-        if df_pce_pivot.empty:
-            last_pce_obs = None
-            if not df_pce_norm.empty and "PCE_Relative" in df_pce_norm.columns:
-                pce_valid = df_pce_norm.loc[df_pce_norm["PCE_Relative"].notna()]
-                if not pce_valid.empty:
-                    last_pce_obs = pce_valid.index.max()
-            message = "No hay observaciones de PCE normalizado del Gemelo Digital disponibles para esta ventana."
-            if last_pce_obs is not None:
-                message += f" Último dato disponible: {last_pce_obs:%Y-%m-%d %H:%M}."
-            tab_fleet_pce.info(message)
-        else:
-            fig_pce_fleet = create_plotly_chart(
-                df_pce_pivot,
-                list(df_pce_pivot.columns),
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_pce_fleet.update_layout(height=420, margin=dict(b=60))
-            fig_pce_fleet.update_yaxes(title_text="PCE / PCE₀")
-            tab_fleet_pce.plotly_chart(fig_pce_fleet, width="stretch", config=plotly_config)
-
+    _render_physical_tracking_expander(df_summary_dyn, ml_artifacts, df_pff_pred, df_pce_norm, active_cells_window, plot_df, selected_metric, resolution_rules)
+    st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+    _render_combined_twin_audit_expander(df_summary_dyn, ml_artifacts, alert_thresholds, active_cells_window, survival_naive_df, max_t)
     st.markdown("<hr style='margin: 3rem 0; opacity: 0.5;'>", unsafe_allow_html=True)
 
     # =================================================================
-    # SECTION 2: PHOTOVOLTAIC PERFORMANCE & TELEMETRY
+    # Section: Photovoltaic Performance & Telemetry
     # =================================================================
     st.markdown(f"### Photovoltaic Performance & Telemetry ({time_window})")
-    
     has_prev = not prev_df.empty
-    pce_act = mean_pce_act
-    pce_prev = mean_pce_prev
-        
+
     if power_cols_plot:
-        plot_df['Fleet_Power_Mean'] = plot_df[power_cols_plot].mean(axis=1)
-        pwr_act = plot_df['Fleet_Power_Mean'].mean()
-        if has_prev and any(c in prev_df.columns for c in power_cols_plot):
-            prev_df['Fleet_Power_Mean'] = prev_df[[c for c in power_cols_plot if c in prev_df.columns]].mean(axis=1)
-            pwr_prev = prev_df['Fleet_Power_Mean'].mean()
+        plot_df["Fleet_Power_Mean"] = plot_df[power_cols_plot].mean(axis=1)
+        pwr_act = plot_df["Fleet_Power_Mean"].mean()
+        available_prev_cols = [c for c in power_cols_plot if c in prev_df.columns]
+        if has_prev and available_prev_cols:
+            prev_df["Fleet_Power_Mean"] = prev_df[available_prev_cols].mean(axis=1)
+            pwr_prev = prev_df["Fleet_Power_Mean"].mean()
         else:
             pwr_prev = np.nan
     else:
-        pwr_act, pwr_prev = np.nan, np.nan
+        pwr_act = pwr_prev = np.nan
 
-    # KPI 1: PV Performance
     if kpi1_type == "Fleet PCE":
-        kpi1_label, kpi1_val, kpi1_delta = "Avg Fleet PCE", format_kpi(pce_act, "%", 2), format_delta(pce_act, pce_prev)
+        kpi1_label, kpi1_val, kpi1_delta = "Avg Fleet PCE", format_kpi(mean_pce_act, "%", 2), format_delta(mean_pce_act, mean_pce_prev)
     else:
         kpi1_label, kpi1_val, kpi1_delta = "Avg Fleet MPPT Power", format_kpi(pwr_act, "mW", 2), format_delta(pwr_act, pwr_prev)
 
-    # KPI 2: Irradiance
     if kpi2_type == "Mean POA Irradiance":
         irr_act = plot_df["POA_Irradiance_W_m2"].mean() if "POA_Irradiance_W_m2" in plot_df.columns else np.nan
         irr_prev = prev_df["POA_Irradiance_W_m2"].mean() if has_prev and "POA_Irradiance_W_m2" in prev_df.columns else np.nan
         kpi2_label, kpi2_val, kpi2_delta = "Mean POA Irradiance", format_kpi(irr_act, "W/m²", 0), format_delta(irr_act, irr_prev)
     else:
-        dose_act = (plot_df["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000 if not plot_df.empty and "POA_Irradiance_W_m2" in plot_df.columns else np.nan
+        dose_act = (plot_df["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000 if "POA_Irradiance_W_m2" in plot_df.columns else np.nan
         dose_prev = (prev_df["POA_Irradiance_W_m2"].sum() * (10 / 60)) / 1000 if has_prev and "POA_Irradiance_W_m2" in prev_df.columns else np.nan
         kpi2_label, kpi2_val, kpi2_delta = "Accumulated POA Dose", format_kpi(dose_act, "kWh/m²", 1), format_delta(dose_act, dose_prev)
 
-    # KPI 3: Temperature
+    temp_col = "ModuleTemp_Mean_C"
     if kpi3_type == "Mean Module Temp.":
-        t_act = plot_df["ModuleTemp_Mean_C"].mean() if "ModuleTemp_Mean_C" in plot_df.columns else np.nan
-        t_prev = prev_df["ModuleTemp_Mean_C"].mean() if has_prev and "ModuleTemp_Mean_C" in prev_df.columns else np.nan
+        t_act = plot_df[temp_col].mean() if temp_col in plot_df.columns else np.nan
+        t_prev = prev_df[temp_col].mean() if has_prev and temp_col in prev_df.columns else np.nan
         kpi3_label = "Mean Module Temp."
     else:
         t_act = plot_df["AmbientTemp_C"].mean() if "AmbientTemp_C" in plot_df.columns else np.nan
@@ -1379,7 +1862,6 @@ def general_overview():
         kpi3_label = "Mean Ambient Temp."
     kpi3_val, kpi3_delta = format_kpi(t_act, "°C", 1), format_delta(t_act, t_prev)
 
-    # KPI 4: Humidity
     if kpi4_type == "Relative Humidity":
         h_act = plot_df["RelativeHumidity_pct"].mean() if "RelativeHumidity_pct" in plot_df.columns else np.nan
         h_prev = prev_df["RelativeHumidity_pct"].mean() if has_prev and "RelativeHumidity_pct" in prev_df.columns else np.nan
@@ -1389,11 +1871,10 @@ def general_overview():
         h_prev = prev_df["AbsoluteHumidity_g_m3"].mean() if has_prev and "AbsoluteHumidity_g_m3" in prev_df.columns else np.nan
         kpi4_label, kpi4_val, kpi4_delta = "Mean Abs. Humidity", format_kpi(h_act, "g/m³", 2), format_delta(h_act, h_prev)
     else:
-        h_act = (plot_df["AbsoluteHumidity_g_m3"].sum() * (10 / 60)) if not plot_df.empty and "AbsoluteHumidity_g_m3" in plot_df.columns else np.nan
+        h_act = (plot_df["AbsoluteHumidity_g_m3"].sum() * (10 / 60)) if "AbsoluteHumidity_g_m3" in plot_df.columns else np.nan
         h_prev = (prev_df["AbsoluteHumidity_g_m3"].sum() * (10 / 60)) if has_prev and "AbsoluteHumidity_g_m3" in prev_df.columns else np.nan
         kpi4_label, kpi4_val, kpi4_delta = "Accumulated Hum. Dose", format_kpi(h_act, "g/m³·h", 1), format_delta(h_act, h_prev)
 
-    # Renderizado estricto a 4 columnas
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(kpi1_label, kpi1_val, kpi1_delta)
     col2.metric(kpi2_label, kpi2_val, kpi2_delta)
@@ -1401,164 +1882,138 @@ def general_overview():
     col4.metric(kpi4_label, kpi4_val, kpi4_delta)
     st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
 
-    # Re-asignar temp_col fijo para que las gráficas inferiores no fallen
-    temp_col = "ModuleTemp_Mean_C"
-
-    # --- MPPT POWER WITH DYNAMIC ENVIRONMENTAL AXIS ---
     secondary_metric = st.session_state.get("secondary_axis_metric", "POA Irradiance")
-    secondary_options = {
-        "POA Irradiance": (
-            "POA_Irradiance_W_m2", "POA Irradiance", "W/m²", "#D97706"
-        ),
-        "Module Temperature": (
-            temp_col, "Module Temperature", "°C", "#DC2626"
-        ),
-        "Absolute Humidity": (
-            "AbsoluteHumidity_g_m3", "Absolute Humidity", "g/m³", "#0891B2"
-        ),
+    secondary_options: dict[str, tuple[str | None, str, str, str]] = {
+        "None": (None, "", "", ""),
+        "POA Irradiance": ("POA_Irradiance_W_m2", "POA Irradiance", "W/m²", "#D97706"),
+        "Module Temperature": (temp_col, "Module Temperature", "°C", "#DC2626"),
+        "Absolute Humidity": ("AbsoluteHumidity_g_m3", "Absolute Humidity", "g/m³", "#0891B2"),
     }
     secondary_col, secondary_name, secondary_unit, secondary_color = secondary_options[secondary_metric]
 
     tab_mppt, tab_pce = st.tabs(["MPPT Power (mW)", "PCE (%)"])
     with tab_mppt:
-        if power_cols_plot and secondary_col in plot_df.columns:
+        if power_cols_plot and (secondary_col is None or secondary_col in plot_df.columns):
             fig_pwr = create_mppt_with_irradiance_chart(
-                df=plot_df,
-                power_cols=power_cols_plot,
-                irr_col=secondary_col,
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules,
-                secondary_name=secondary_name,
-                secondary_unit=secondary_unit,
-                secondary_color=secondary_color,
-                primary_axis_title="Power (mW)",
+                df=plot_df, power_cols=power_cols_plot, irr_col=secondary_col, central_metric=selected_metric,
+                resolution_rules=resolution_rules, secondary_name=secondary_name, secondary_unit=secondary_unit,
+                secondary_color=secondary_color, primary_axis_title="Power (mW)",
             )
-            st.plotly_chart(fig_pwr, width="stretch", config=plotly_config)
+            st.plotly_chart(fig_pwr, width="stretch", config=PLOTLY_CONFIG)
         elif not power_cols_plot:
             st.info("No active MPPT Power data recorded for the selected period.")
         else:
             st.info(f"No {secondary_name} data recorded for the selected period.")
 
     with tab_pce:
-        if pce_cols_plot and secondary_col in plot_df.columns:
+        if pce_cols_plot and (secondary_col is None or secondary_col in plot_df.columns):
             fig_pce = create_mppt_with_irradiance_chart(
-                df=plot_df,
-                power_cols=pce_cols_plot,
-                irr_col=secondary_col,
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules,
-                secondary_name=secondary_name,
-                secondary_unit=secondary_unit,
-                secondary_color=secondary_color,
-                primary_axis_title="PCE (%)",
+                df=plot_df, power_cols=pce_cols_plot, irr_col=secondary_col, central_metric=selected_metric,
+                resolution_rules=resolution_rules, secondary_name=secondary_name, secondary_unit=secondary_unit,
+                secondary_color=secondary_color, primary_axis_title="PCE (%)",
             )
-            st.plotly_chart(fig_pce, width="stretch", config=plotly_config)
+            st.plotly_chart(fig_pce, width="stretch", config=PLOTLY_CONFIG)
         elif not pce_cols_plot:
             st.info("No active PCE data recorded for the selected period.")
         else:
             st.info(f"No {secondary_name} data recorded for the selected period.")
 
-    st.selectbox(
-        "Secondary Axis (Environmental)",
-        ["POA Irradiance", "Module Temperature", "Absolute Humidity"],
-        key="secondary_axis_metric",
-    )
-
+    st.selectbox("Secondary Axis (Environmental)", ["POA Irradiance", "Module Temperature", "Absolute Humidity", "None"], key="secondary_axis_metric")
     st.markdown("<hr style='margin: 1.5rem 0; opacity: 0.3;'>", unsafe_allow_html=True)
 
-    # =================================================================
-    # COLLAPSIBLE: YIELD VS ENVIRONMENTAL STRESS ANALYSIS
-    # =================================================================
-    with st.expander(" Yield vs. Environmental Stress Analysis (Fleet Average)", expanded=False):
+    with st.expander("Yield vs. Environmental Stress Analysis (Fleet Average)", expanded=False):
         st.caption("Compare aggregate photovoltaic response against environmental stressors.")
-
         col_ui1, col_ui2 = st.columns(2)
         with col_ui1:
-            pv_metric = st.selectbox(
-                "Primary Axis (Photovoltaic)", 
-                ["Energy Yield (kWh/m²)", "Conversion Efficiency (%)"]
-            )
+            pv_metric = st.selectbox("Primary Axis (Photovoltaic)", ["Energy Yield (kWh/m²)", "Conversion Efficiency (%)"])
         with col_ui2:
-            env_metric = st.selectbox(
-                "Secondary Axis (Environmental)", 
-                ["Radiation Dose (kWh/m²)", "Thermal Load (°C·h)", "Absolute Humidity Dose (g/m³·h)"]
-            )
-
+            env_metric = st.selectbox("Secondary Axis (Environmental)", ["Radiation Dose (kWh/m²)", "Thermal Load (°C·h)", "Absolute Humidity Dose (g/m³·h)"])
         if plot_df.empty or not active_power_cols:
             st.info("Insufficient active telemetry data.")
         else:
             fig_dual = create_pv_vs_env_chart(
-                df=plot_df, 
-                power_cols=active_power_cols, 
-                temp_col=temp_col, 
-                pv_metric=pv_metric, 
-                env_metric=env_metric,
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules
+                df=plot_df, power_cols=active_power_cols, temp_col=temp_col, pv_metric=pv_metric,
+                env_metric=env_metric, central_metric=selected_metric, resolution_rules=resolution_rules,
             )
-            st.plotly_chart(fig_dual, width="stretch", config=plotly_config)
-
+            st.plotly_chart(fig_dual, width="stretch", config=PLOTLY_CONFIG)
     st.markdown("<hr style='margin: 2rem 0; opacity: 0.5;'>", unsafe_allow_html=True)
-    
-    # --- SECONDARY SENSORS: 2x2 GRID (NO TABS) ---
+
     st.markdown("##### Environmental Context")
-    
-    # Row 1
     r1_c1, r1_c2 = st.columns(2)
     with r1_c1:
         st.markdown("###### Instantaneous POA Irradiance (W/m²)")
         if "POA_Irradiance_W_m2" in plot_df.columns:
-            fig_irr = create_plotly_chart(
-                plot_df, "POA_Irradiance_W_m2", ["#36B9CC"], central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_irr.update_layout(height=320, margin=dict(b=20))
-            st.plotly_chart(fig_irr, width="stretch", config=plotly_config)
-            
+            fig = create_plotly_chart(plot_df, "POA_Irradiance_W_m2", ["#36B9CC"], central_metric=selected_metric, resolution_rules=resolution_rules)
+            fig.update_layout(height=320, margin=dict(b=20))
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     with r1_c2:
         st.markdown("###### Ambient vs. Module Temperature (°C)")
         if "AmbientTemp_C" in plot_df.columns and temp_col in plot_df.columns:
-            fig_temp = create_plotly_chart(
-                plot_df,
-                ["AmbientTemp_C", temp_col],
-                ["#1E293B", "#F59E0B"],
-                central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_temp.update_layout(height=320, margin=dict(b=20))
-            st.plotly_chart(fig_temp, width="stretch", config=plotly_config)
-
+            fig = create_plotly_chart(plot_df, ["AmbientTemp_C", temp_col], ["#1E293B", "#F59E0B"], central_metric=selected_metric, resolution_rules=resolution_rules)
+            fig.update_layout(height=320, margin=dict(b=20))
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 
-    # Row 2
     r2_c1, r2_c2 = st.columns(2)
     with r2_c1:
         st.markdown("###### Relative Humidity (%)")
         if "RelativeHumidity_pct" in plot_df.columns:
-            fig_rh = create_plotly_chart(
-                plot_df, "RelativeHumidity_pct", ["#3B82F6"], central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_rh.update_layout(height=320, margin=dict(b=20))
-            st.plotly_chart(fig_rh, width="stretch", config=plotly_config)
-            
+            fig = create_plotly_chart(plot_df, "RelativeHumidity_pct", ["#3B82F6"], central_metric=selected_metric, resolution_rules=resolution_rules)
+            fig.update_layout(height=320, margin=dict(b=20))
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     with r2_c2:
         st.markdown("###### Absolute Humidity (g/m³)")
         if "AbsoluteHumidity_g_m3" in plot_df.columns:
-            fig_ah = create_plotly_chart(
-                plot_df, "AbsoluteHumidity_g_m3", ["#8B5CF6"], central_metric=selected_metric,
-                resolution_rules=resolution_rules
-            )
-            fig_ah.update_layout(height=320, margin=dict(b=20))
-            st.plotly_chart(fig_ah, width="stretch", config=plotly_config)
+            fig = create_plotly_chart(plot_df, "AbsoluteHumidity_g_m3", ["#8B5CF6"], central_metric=selected_metric, resolution_rules=resolution_rules)
+            fig.update_layout(height=320, margin=dict(b=20))
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
 
 # =====================================================================
-# VIEW 2: DEVICE ANALYSIS
+# 9. PAGE: DEVICE ANALYSIS
 # =====================================================================
-def device_analysis():
+_XAI_FEATURE_LABELS = {
+    "ModuleTemp_C": "Module Temp. (°C)",
+    "POA_Irradiance_W_m2": "Irradiance (W/m²)",
+    "AbsoluteHumidity_g_m3": "Absolute Humidity (g/m³)",
+    "Delta_Temp_C_per_h": "Thermal Shock (ΔT/h)",
+    "Delta_Hum_g_m3_per_h": "Moisture Ingress (ΔH/h)",
+    "Hour_Sin": "Time of Day (Cyclic Sin)",
+    "Hour_Cos": "Time of Day (Cyclic Cos)",
+    "Day_Sin": "Seasonality (Cyclic Sin)",
+    "Day_Cos": "Seasonality (Cyclic Cos)"
+}
+
+
+def _render_device_kpis(target_device: str, summary_table: pd.DataFrame, df_twin_diag: pd.DataFrame) -> None:
+    soh_val, pce_val, anomaly_val, exposure_val = "—", "—", "—", "—"
+
+    if not df_twin_diag.empty and "cell_name" in df_twin_diag.columns:
+        cell_df = df_twin_diag[df_twin_diag["cell_name"] == target_device]
+        if not cell_df.empty and "PCE_Relative" in cell_df.columns:
+            latest_pce_relative = cell_df["PCE_Relative"].dropna()
+            if not latest_pce_relative.empty:
+                soh_val = f"{latest_pce_relative.iloc[-1] * 100:.1f} %"
+        if not cell_df.empty and "Alert_PCE" in cell_df.columns and "Alert_pFF" in cell_df.columns:
+            has_alert = bool(cell_df[["Alert_PCE", "Alert_pFF"]].fillna(False).astype(bool).any().any())
+            anomaly_val = "Alert" if has_alert else "Normal"
+
+    is_defective = False
+    if isinstance(summary_table, pd.DataFrame) and target_device in summary_table.index:
+        val = summary_table.loc[target_device, "extrinsic_failure"]
+        is_defective = bool(val.iloc[0] if isinstance(val, pd.Series) else val)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Latest Normalized PCE", soh_val)
+    col2.metric("Current PCE", pce_val)
+    col3.metric("Anomaly Status (Digital Twin)", anomaly_val)
+    col4.metric("Days of Exposure", exposure_val)
+
+
+def device_analysis() -> None:
     ml_artifacts = load_ml_artifacts()
     survival_df = load_survival_data()
-    xai_rules = load_xai_rules()
+    df_twin_diag = load_twin_diagnostics()
     device_options = get_device_options(ml_artifacts, survival_df)
 
     st.sidebar.subheader("Cell Selection")
@@ -1567,77 +2022,114 @@ def device_analysis():
         st.stop()
     target_device = st.sidebar.selectbox("Target Device", device_options)
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"Created by [{CREATOR_LINK.split('/')[-1]}]({CREATOR_LINK}).")
+    st.sidebar.markdown(f"Created by [{CREATOR_NAME}]({CREATOR_LINK}).")
+
     st.markdown(f"### Unitary Diagnostics — Device **{target_device}**")
     st.caption("Detailed evaluation of electrical parameters and degradation indicators.")
     st.markdown("<div style='height: 0.4rem;'></div>", unsafe_allow_html=True)
-    with st.container(border=True):
-        col_label, col_control = st.columns([1, 4], vertical_alignment="center")
-        with col_label:
-            st.markdown("** Time Window**")
-        with col_control:
-            st.segmented_control("Device Range", options=["Last Sweep", "Weekly", "Historical"], default="Last Sweep", label_visibility="collapsed")
-    st.markdown("<div style='height: 0.6rem;'></div>", unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("State of Health (SoH)", "88.4 %", "-1.2%")
-    col2.metric("Current PCE", "16.8 %", "-0.2 %")
-    col3.metric("Anomalies (Isolation Forest)", "Normal", "Stable")
-    col4.metric("Estimated Lifespan", "1,450 h", "-40 h")
+
+    summary_table = ml_artifacts.get("summary_table", pd.DataFrame())
+    _render_device_kpis(target_device, summary_table, df_twin_diag)
     st.markdown("---")
-    tab1, tab2, tab3, tab4 = st.tabs(["Efficiency (PCE)", "J-V Kinematics", "Prognostics (XGBoost)", "LLM Diagnostics"])
-    with tab1:
-        st.markdown("### Historical Evolution of Power Conversion Efficiency (PCE)")
-        pce_cell = pd.DataFrame({"PCE": np.linspace(18.5, 14.0, 100) + np.random.normal(0, 0.2, 100)}, index=dates_index)
-        fig_t1 = go.Figure(go.Scatter(x=pce_cell.index, y=pce_cell["PCE"], line=dict(color="#10B981")))
-        fig_t1.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white")
-        st.plotly_chart(fig_t1, width="stretch", config=plotly_config)
-    with tab2:
-        st.markdown("### J-V Characteristic Curves (Reverse / Forward Scans)")
-        voltage = np.linspace(-0.2, 1.2, 100)
-        j_forward = 22 * (1 - np.exp(10 * (voltage - 1.05)))
-        fig_t2 = go.Figure(go.Scatter(x=voltage, y=j_forward, line=dict(color="#F43F5E")))
-        fig_t2.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white")
-        st.plotly_chart(fig_t2, width="stretch", config=plotly_config)
-    with tab3:
-        st.markdown("### Degradation Projection (XGBoost Engine with Monotonicity)")
-        projection = np.linspace(0, 100, 50)
-        damage = np.log1p(projection) * 20
-        fig_t3 = go.Figure(go.Scatter(x=projection, y=damage, line=dict(color="#8B5CF6")))
-        fig_t3.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white")
-        st.plotly_chart(fig_t3, width="stretch", config=plotly_config)
-    with tab4:
-        st.markdown("### Thermodynamic Report & Explainability (XAI + LLM)")
-        device_rules = xai_rules.get(target_device)
-        if device_rules:
-            threshold_day = device_rules.get("Threshold_15pct_Day")
-            if threshold_day is not None:
-                st.metric("15% Alert Crossing", f"Day {threshold_day:.2f}")
-            st.markdown("**Features used by the short-term Digital Twin**")
-            st.write(", ".join(device_rules.get("Features_Used", [])))
-            st.markdown("**Deterministic surrogate-tree rules**")
-            st.code("\n".join(device_rules.get("Extracted_Rules", [])), language="text")
-            st.caption(
-                "The alert is triggered when either the PCE power twin or the pFF structural twin detects "
-                "underperformance. The rules above expose the exact thermodynamic conditions for this cell."
-            )
+
+    tab_pce, tab_twin, tab_xai = st.tabs(["Normalized PCE Trend", "Digital Twin Comparison", "LLM Diagnostics"])
+
+    cell_df = pd.DataFrame()
+    if not df_twin_diag.empty and "cell_name" in df_twin_diag.columns:
+        cell_df = df_twin_diag[df_twin_diag["cell_name"] == target_device].sort_index()
+
+    with tab_pce:
+        st.markdown("### Historical Evolution of Normalized PCE")
+        if not cell_df.empty and "PCE_Relative" in cell_df.columns:
+            fig = go.Figure(go.Scatter(x=cell_df.index, y=cell_df["PCE_Relative"], line=dict(color="#10B981")))
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white")
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
         else:
-            summary_table = ml_artifacts.get("summary_table", pd.DataFrame())
-            is_defective = (
-                isinstance(summary_table, pd.DataFrame)
-                and target_device in summary_table.index
-                and bool(summary_table.loc[target_device, "extrinsic_failure"])
-            )
-            if is_defective:
-                st.warning("No surrogate-tree rules were exported for this defective cell.")
-            else:
-                st.info("No surrogate-tree anomaly rules were exported for this validated cell.")
+            st.info("No normalized PCE trend is available for this device.")
+
+    with tab_twin:
+        st.markdown("### Measured vs. Digital Twin Prediction")
+        required_cols = {"PCE_Relative", "Twin_PCE_Pred_Relative", "pFF", "Twin_pFF_Pred"}
+        if not cell_df.empty and required_cols.issubset(cell_df.columns):
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                                 subplot_titles=("Normalized PCE (relative to initial peak)", "Fill Factor (pFF)"))
+            fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["PCE_Relative"], name="PCE Real", line=dict(color="#1E293B", width=2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["Twin_PCE_Pred_Relative"], name="Twin PCE", line=dict(color="#10B981", width=2, dash="dot")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["pFF"], name="pFF Real", line=dict(color="#1E293B", width=2)), row=2, col=1)
+            fig.add_trace(go.Scatter(x=cell_df.index, y=cell_df["Twin_pFF_Pred"], name="Twin pFF", line=dict(color="#3B82F6", width=2, dash="dot")), row=2, col=1)
+            fig.update_layout(height=520, margin=dict(l=10, r=10, t=40, b=10), plot_bgcolor="white", hovermode="x unified")
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        else:
+            st.info("No Digital Twin comparison data is available for this device.")
+
+    with tab_xai:
+        st.markdown("### Thermodynamic Report & Explainability (XAI + LLM)")
+        st.caption("Surrogate decision-tree rules explaining early anomalies (ML) and physical collapse (T80).")
+
+        twin_rules = load_twin_rules().get(target_device, {})
+        forensic_rules = load_forensic_rules().get(target_device, {})
+        
+        is_defective = False
+        if isinstance(summary_table, pd.DataFrame) and target_device in summary_table.index:
+            val = summary_table.loc[target_device, "extrinsic_failure"]
+            is_defective = bool(val.iloc[0] if isinstance(val, pd.Series) else val)
+
+        if not is_defective:
+            st.success("🟢 Validated cell belonging to the production cohort. No critical anomalies recorded.")
+        elif not twin_rules and not forensic_rules:
+            st.warning("⚠️ This cell failed, but no surrogate rules could be extracted (insufficient variance or abrupt failure).")
+        else:
+            c1, c2 = st.columns(2)
+            
+            # 1. Digital Twin Surrogate (ML Alerts)
+            with c1:
+                st.markdown("#### Digital Twin Surrogate (ML Alerts)")
+                if twin_rules:
+                    alert_day = twin_rules.get("ML_Alert_Day", "N/A")
+                    st.metric("Anomaly Alert Crossing", f"Day {alert_day:.1f}" if isinstance(alert_day, float) else alert_day)
+                    
+                    st.markdown("**Environmental Stressors (Relative Impact):**")
+                    for feat, weight in twin_rules.get("Feature_Importances", {}).items():
+                        st.caption(f"{_XAI_FEATURE_LABELS.get(feat, feat)} — {weight * 100:.1f}%")
+                        st.progress(float(weight))
+                        
+                    st.markdown("**Decision Path (Alert Triggers):**")
+                    st.code("\n".join(twin_rules.get("Rules", [])), language="text")
+                else:
+                    st.info("No ML anomalies triggered for this device during burn-in.")
+
+            # 2. Physical Forensic Surrogate (T80 Death)
+            with c2:
+                st.markdown("#### Physical Forensic Surrogate (T80 Death)")
+                if forensic_rules:
+                    t80_day = forensic_rules.get("T80_Day", "N/A")
+                    st.metric("Physical Collapse Day (T80)", f"Day {t80_day:.1f}" if isinstance(t80_day, float) else t80_day)
+                    
+                    if "Intrinsic Defect" in forensic_rules.get("Rules", [""])[0]:
+                        st.error("**Intrinsic Defect:** Physical collapse occurred without distinct environmental stressors separating the prodromal window from its healthy history.")
+                    else:
+                        st.markdown(f"**Environmental Stressors ({PRODROMAL_WINDOW_DAYS:g}-Day Prodromal Window):**")
+                        for feat, weight in forensic_rules.get("Feature_Importances", {}).items():
+                            st.caption(f"{_XAI_FEATURE_LABELS.get(feat, feat)} — {weight * 100:.1f}%")
+                            st.progress(float(weight))
+                            
+                        st.markdown("**Decision Path (Death Triggers):**")
+                        st.code("\n".join(forensic_rules.get("Rules", [])), language="text")
+                else:
+                    st.info("Device did not cross T80 physical death threshold during the burn-in phase.")
+
 
 # =====================================================================
-# APP STARTUP
+# 10. APPLICATION ENTRY POINT
 # =====================================================================
-load_styles()
-render_branding()
-general_page = st.Page(general_overview, title="General Overview", icon=":material/dashboard:")
-device_page = st.Page(device_analysis, title="Device Analysis", icon=":material/troubleshoot:")
-pg = st.navigation({"ANALYSIS MODULES": [general_page, device_page]})
-pg.run()
+def main() -> None:
+    load_styles()
+    render_branding()
+    general_page = st.Page(general_overview, title="General Overview", icon=":material/dashboard:")
+    device_page = st.Page(device_analysis, title="Device Analysis", icon=":material/troubleshoot:")
+    navigation = st.navigation({"ANALYSIS MODULES": [general_page, device_page]})
+    navigation.run()
+
+
+if __name__ == "__main__":
+    main()

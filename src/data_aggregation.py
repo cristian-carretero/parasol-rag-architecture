@@ -10,6 +10,8 @@ from pathlib import Path
 import pandas as pd
 import logging
 
+from src.config import CELL_AREA_M2, DAYLIGHT_IRRADIANCE_MIN_W_M2
+
 # Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -19,11 +21,6 @@ logger = logging.getLogger("DataAggregation")
 
 PROCESSED_DIR = Path("data/processed/outdoor")
 AGGREGATED_DIR = Path("data/aggregated/outdoor")
-
-CELL_AREA_M2 = 0.64 / 10000.0
-
-# Minimum irradiance threshold to prevent numerical instability in PCE calculation
-PCE_IRRADIANCE_MIN_W_M2 = 100.0
 
 def aggregate_device_data(device_id: str) -> None:
     """
@@ -78,12 +75,12 @@ def aggregate_device_data(device_id: str) -> None:
         power_col = next((col for col in df_merged.columns if 'power' in col.lower() or 'p_mpp' in col.lower()), None)
 
         if power_col is not None and 'POA_Irradiance_W_m2' in df_merged.columns:
-            mask_day_gap = df_merged['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2
+            mask_day_gap = df_merged['POA_Irradiance_W_m2'] > DAYLIGHT_IRRADIANCE_MIN_W_M2
             n_gaps = df_merged.loc[mask_day_gap, power_col].isna().sum()
             if n_gaps > 0:
                 logger.warning(f"[{device_id}] {n_gaps} daylight rows lack MPPT values after the temporal join — possible sensor gap.")
 
-            mask_day = df_merged['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2
+            mask_day = df_merged['POA_Irradiance_W_m2'] > DAYLIGHT_IRRADIANCE_MIN_W_M2
             
             # Absolute PCE mathematically requires active area normalization
             df_merged.loc[mask_day, 'PCE'] = (df_merged.loc[mask_day, power_col]) / (df_merged.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2) * 100.0
@@ -182,7 +179,7 @@ def aggregate_fleet_data(device_ids: list) -> None:
                         logger.warning(f"[{device_id}] {n_gaps} rows lack MPPT values after the temporal join.")
 
                 if power_col and 'POA_Irradiance_W_m2' in fleet_dataset.columns:
-                    mask_day = fleet_dataset['POA_Irradiance_W_m2'] > PCE_IRRADIANCE_MIN_W_M2
+                    mask_day = fleet_dataset['POA_Irradiance_W_m2'] > DAYLIGHT_IRRADIANCE_MIN_W_M2
                     pce_col = f'PCE_{device_id}'
                     
                     fleet_dataset.loc[mask_day, pce_col] = fleet_dataset.loc[mask_day, power_col] / (fleet_dataset.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2) * 100.0

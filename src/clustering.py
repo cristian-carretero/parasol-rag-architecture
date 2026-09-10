@@ -18,6 +18,8 @@ from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bo
 from sklearn.ensemble import IsolationForest
 from sklearn_extra.cluster import KMedoids
 
+from src.config import PCA_TARGET_EXPLAINED_VARIANCE
+
 # Professional MLOps logging configuration
 logger = logging.getLogger("Clustering")
 
@@ -163,7 +165,10 @@ def evaluate_cluster_metrics(
     return cluster_range, inertia, silhouette_avg, calinski, davies, min_dpff_list
 
 
-def get_optimal_pca_components(X: np.ndarray, target_variance: float = 0.90) -> int:
+def get_optimal_pca_components(
+    X: np.ndarray,
+    target_variance: float = PCA_TARGET_EXPLAINED_VARIANCE,
+) -> int:
     """Identifies the minimum PCA components required to reach target variance."""
     pca = PCA().fit(X)
     cum_var = np.cumsum(pca.explained_variance_ratio_)
@@ -455,7 +460,10 @@ if __name__ == "__main__":
         logger.info(f"\n{'='*60}\n STARTING ITERATION {iteration} | Active Curves: {len(active_curves)}\n{'='*60}")
 
         X_active = np.stack(active_curves.tolist())
-        num_pca = get_optimal_pca_components(X_active, target_variance=0.90)
+        num_pca = get_optimal_pca_components(
+            X_active,
+            target_variance=PCA_TARGET_EXPLAINED_VARIANCE,
+        )
 
         X_temp_series = stratified_sample_by_cell(active_curves, min(1500, len(active_curves)))
         X_temp = np.stack(X_temp_series.tolist())

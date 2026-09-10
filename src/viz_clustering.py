@@ -19,6 +19,8 @@ import seaborn as sns
 import plotly.express as px
 from sklearn.decomposition import PCA
 
+from src.config import PCA_TARGET_EXPLAINED_VARIANCE
+
 # Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +41,13 @@ def plot_pca_variance_and_loadings(pca_full: PCA, pca: PCA, n_points: int = 50, 
     cum_var = np.cumsum(pca_full.explained_variance_ratio_)[:max_comps + 1]
     
     ax_var.plot(range(1, len(cum_var) + 1), cum_var, marker='o', lw=3, ms=8, color='teal')
-    ax_var.axhline(y=0.90, color='r', linestyle='--', lw=2, label='90% Explained Variance')
+    ax_var.axhline(
+        y=PCA_TARGET_EXPLAINED_VARIANCE,
+        color='r',
+        linestyle='--',
+        lw=2,
+        label=f'{PCA_TARGET_EXPLAINED_VARIANCE:.0%} Explained Variance',
+    )
     ax_var.set(xlabel='Number of Components', ylabel='Cumulative Explained Variance', 
                title='PCA: Cumulative Explained Variance', xlim=(0.5, max_comps + 1.5))
     ax_var.grid(True, linestyle='--', alpha=0.5)

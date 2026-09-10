@@ -12,6 +12,8 @@ import json
 import pandas as pd
 import numpy as np
 
+from src.config import OPERATIONAL_HOUR_END, OPERATIONAL_HOUR_START
+
 # Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +78,10 @@ def _process_single_cell(
     df_c['is_reverse'] = (df_c['ScanDirection'] == 'Reverse').astype('int8') if 'ScanDirection' in df_c.columns else 0
 
     # --- 2. VECTORIZED POINT-LEVEL METRICS ---
-    df_c['is_in_time'] = (df_c['Timestamp'].dt.hour >= 6) & (df_c['Timestamp'].dt.hour <= 22)
+    df_c['is_in_time'] = (
+        (df_c['Timestamp'].dt.hour >= OPERATIONAL_HOUR_START)
+        & (df_c['Timestamp'].dt.hour <= OPERATIONAL_HOUR_END)
+    )
     
     # [PHYSICS FIX]: Negative Current Isolation
     # Current is naturally negative when exceeding Voc (diode injection regime). 
