@@ -63,6 +63,10 @@ TWIN_RULES_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "twin_surrogate
 FORENSIC_RULES_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "forensic_surrogate_rules.json"
 GRID_SEARCH_PATH = ARTIFACTS_PATH.parent.parent / "diagnostics" / "burn_in_grid_search.parquet"
 
+RUL_MATRIX_PATH = Path("data/rul/rul_features_matrix.parquet")
+RUL_SIM_SENSOR_PATH = Path("data/rul/rul_sim_sensor.parquet")
+RUL_SIM_API_PATH = Path("data/rul/rul_sim_api.parquet")
+
 # Empirical threshold audit configuration
 AUDIT_CASE_STUDIES = [
     "M83AB302", "P12", "A170AB302",
@@ -198,7 +202,6 @@ def load_forensic_rules() -> dict:
         st.warning(f"Failed to load Forensic surrogate rules: {exc}")
     return {}
 
-
 def get_device_options(ml_artifacts: dict, survival_df: pd.DataFrame) -> list[str]:
     devices: set[str] = set()
     summary_table = ml_artifacts.get("summary_table", pd.DataFrame())
@@ -215,6 +218,33 @@ def load_grid_search_data() -> pd.DataFrame:
             return pd.read_parquet(GRID_SEARCH_PATH)
     except Exception as exc:
         st.warning(f"Failed to load burn-in grid search data: {exc}")
+    return pd.DataFrame()
+
+@st.cache_data(show_spinner=False)
+def load_rul_matrix() -> pd.DataFrame:
+    try:
+        if RUL_MATRIX_PATH.exists():
+            return pd.read_parquet(RUL_MATRIX_PATH)
+    except Exception as exc:
+        st.warning(f"Failed to load RUL feature matrix: {exc}")
+    return pd.DataFrame()
+
+@st.cache_data(show_spinner=False)
+def load_rul_sim_sensor() -> pd.DataFrame:
+    try:
+        if RUL_SIM_SENSOR_PATH.exists():
+            return pd.read_parquet(RUL_SIM_SENSOR_PATH)
+    except Exception as exc:
+        st.warning(f"Failed to load RUL sensor simulation data: {exc}")
+    return pd.DataFrame()
+
+@st.cache_data(show_spinner=False)
+def load_rul_sim_api() -> pd.DataFrame:
+    try:
+        if RUL_SIM_API_PATH.exists():
+            return pd.read_parquet(RUL_SIM_API_PATH)
+    except Exception as exc:
+        st.warning(f"Failed to load RUL API simulation data: {exc}")
     return pd.DataFrame()
 
 # =====================================================================
@@ -1643,6 +1673,180 @@ def _render_combined_twin_audit_expander(
                     st.markdown("* *None*")
                 st.markdown(f"**3. Final Validated Production Cohort:**\n`{', '.join(production_cohort) if production_cohort else 'N/A'}`")
 
+def _render_rul_simulation_expander(
+    df_daily: pd.DataFrame,
+    df_sim_sensor: pd.DataFrame,
+    df_sim_api: pd.DataFrame,
+    target_cell: str = "ASLRXAB341"
+) -> None:
+    """
+    Renders the Remaining Useful Life (RUL) forecasting validation based on weekly 
+    anchor points against the survival Ground Truth, featuring a dynamic cell selector.
+    """
+    if df_daily.empty or df_sim_sensor.empty or df_sim_api.empty:
+        return
+
+    # Extract available cells from the simulations
+    available_cells = sorted(df_sim_sensor["cell_name"].unique())
+    if not available_cells:
+        return
+
+    expander = st.expander("RUL Forecasting & Model Audit", expanded=True)
+    with expander:
+        # --- DYNAMIC CELL SELECTOR ---
+        header_col, selector_col = st.columns([2.5, 1])
+        with header_col:
+            st.markdown("#### Kinematic Remaining Useful Life (PCE) Validation")
+            st.caption("Predictive capacity audit: Local physical sensors vs. Calibrated Open-Meteo satellite weather against T80 collapse Ground Truth.")
+        
+        with selector_col:
+            default_index = available_cells.index(target_cell) if target_cell in available_cells else 0
+            selected_cell = st.selectbox(
+                "Select Device / Cell:",
+                options=available_cells,
+                index=default_index,
+                key="rul_selected_cell_selector"
+            )
+
+        # Filter historical data for the mature phase of the selected cell
+        df_hist = df_daily[
+            (df_daily["cell_name"] == selected_cell) & (df_daily["Exposure_Days"] > BURN_IN_DAYS)
+        ].sort_values("Exposure_Days").copy()
+        
+        # Filter simulations indexed by Anchor_Day for the selected cell
+        df_sens = df_sim_sensor[df_sim_sensor["cell_name"] == selected_cell].sort_values("Anchor_Day").copy()
+        df_api = df_sim_api[df_sim_api["cell_name"] == selected_cell].sort_values("Anchor_Day").copy()
+
+        if df_hist.empty or df_sens.empty:
+            st.warning(f"Insufficient processed data for cell {selected_cell}.")
+            return
+
+        # Calculate actual RUL (Ground Truth)
+        true_survival = df_sens["True_Survival_Days"].iloc[0]
+        df_sens["RUL_Real"] = true_survival - df_sens["Anchor_Day"]
+
+        valid_sens = df_sens[df_sens["RUL_Real"] > 0]
+        mae_sens = float(np.mean(np.abs(valid_sens["RUL_Pred"] - valid_sens["RUL_Real"]))) if not valid_sens.empty else np.nan
+        mae_api = float(np.mean(np.abs(df_api.loc[valid_sens.index, "RUL_Pred"] - valid_sens["RUL_Real"]))) if not valid_sens.empty else np.nan
+
+        # --- 1. KPI CARDS ---
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+        kpi_col1.metric("True Lifespan (T80)", f"{true_survival:.1f} days" if pd.notna(true_survival) else "Censored")
+        kpi_col2.metric("Local Sensor MAE", f"{mae_sens:.2f} d" if pd.notna(mae_sens) else "N/A")
+        kpi_col3.metric(
+            "Calibrated API MAE", 
+            f"{mae_api:.2f} d" if pd.notna(mae_api) else "N/A", 
+            delta=f"{mae_api - mae_sens:+.2f} d vs Sensor" if pd.notna(mae_sens) and pd.notna(mae_api) else None, 
+            delta_color="inverse"
+        )
+        kpi_col4.metric("Evaluated Horizon", f"{df_sens['Anchor_Day'].max() - df_sens['Anchor_Day'].min():.1f} days")
+
+        st.markdown("<div style='height: 0.5rem;'></div>", unsafe_allow_html=True)
+
+        # --- 2. MAIN CHART: RUL CONVERGENCE ---
+        fig_rul = go.Figure()
+
+        if pd.notna(true_survival):
+            fig_rul.add_trace(go.Scatter(
+                x=df_sens["Anchor_Day"], y=df_sens["RUL_Real"],
+                mode="lines", name="Ground Truth (True RUL)",
+                line=dict(color="#10B981", width=3, dash="dot")
+            ))
+
+        fig_rul.add_trace(go.Scatter(
+            x=df_sens["Anchor_Day"], y=df_sens["RUL_Pred"],
+            mode="lines+markers", name="Local Sensor Forecast",
+            line=dict(color="#3B82F6", width=2.5), marker=dict(size=7, symbol="circle")
+        ))
+
+        fig_rul.add_trace(go.Scatter(
+            x=df_api["Anchor_Day"], y=df_api["RUL_Pred"],
+            mode="lines+markers", name="Calibrated API Forecast",
+            line=dict(color="#F59E0B", width=2, dash="dash"), marker=dict(size=7, symbol="triangle-up")
+        ))
+
+        fig_rul.add_hrect(
+            y0=0, y1=7, line_width=0, fillcolor="#EF4444", opacity=0.12,
+            annotation_text="Imminent Danger (< 7 Days)", annotation_position="top left",
+            annotation_font=dict(size=11, color="#DC2626")
+        )
+
+        fig_rul.update_layout(
+            title=dict(
+                text=f"<b>Forecast Convergence (Predicted vs. True RUL) — {selected_cell}</b>",
+                font=dict(size=15, color="#1E293B"),
+                x=0.01, y=0.96
+            ),
+            xaxis=dict(
+                title="Anchor Day (Operating Time Evaluation)",
+                showgrid=True, gridcolor="#F1F5F9", zeroline=False
+            ),
+            yaxis=dict(
+                title="Remaining Days until Collapse (T80)",
+                showgrid=True, gridcolor="#F1F5F9", zeroline=False,
+                range=[0, max(true_survival - BURN_IN_DAYS + 10, df_sens["RUL_Pred"].max() + 5)] if pd.notna(true_survival) else None
+            ),
+            height=370,
+            margin=dict(l=20, r=20, t=65, b=20),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=0.99,
+                font=dict(size=11, color="#1E293B"), bgcolor="rgba(255,255,255,0.7)"
+            ),
+            plot_bgcolor="white", paper_bgcolor="white"
+        )
+        st.plotly_chart(fig_rul, width='stretch', config=PLOTLY_CONFIG)
+
+        st.markdown("<hr style='margin: 1.2rem 0; opacity: 0.2;'>", unsafe_allow_html=True)
+        st.markdown(f"##### Physical Degradation Breakdown (Target & State) — `{selected_cell}`")
+
+        # --- 3. SUBPLOTS IN INDEPENDENT COLUMNS ---
+        col_dmg, col_inc = st.columns(2)
+
+        with col_dmg:
+            fig_damage = go.Figure()
+            fig_damage.add_trace(go.Scatter(
+                x=df_hist["Exposure_Days"], y=df_hist["Cumulative_Damage"] * 100,
+                mode="lines", name="Cumulative Damage",
+                line=dict(color="#1E293B", width=2.5),
+                fill="tozeroy", fillcolor="rgba(30, 41, 59, 0.05)"
+            ))
+            
+            # Dynamic threshold computation mapping directly to T80_FRACTION
+            t80_threshold_pct = (1.0 - T80_FRACTION) * 100
+            
+            fig_damage.add_hline(
+                y=t80_threshold_pct, line_dash="dash", line_color="#EF4444", line_width=1.5,
+                annotation_text=f"T80 Damage Limit ({t80_threshold_pct:.1f}%)", annotation_position="top left",
+                annotation_font=dict(size=10, color="#EF4444")
+            )
+            fig_damage.update_layout(
+                title=dict(text="<b>Cumulative Structural Damage</b>", font=dict(size=13, color="#1E293B"), x=0.02),
+                xaxis=dict(title="Exposure Days", showgrid=True, gridcolor="#F1F5F9"),
+                yaxis=dict(
+                    title="Cumulative Damage (%)", showgrid=True, gridcolor="#F1F5F9",
+                    range=[0, max(t80_threshold_pct + 5.0, float(df_hist["Cumulative_Damage"].max() * 100) + 5)]
+                ),
+                height=280,
+                margin=dict(l=15, r=15, t=45, b=15),
+                plot_bgcolor="white", paper_bgcolor="white", showlegend=False
+            )
+            st.plotly_chart(fig_damage, width='stretch', config=PLOTLY_CONFIG)
+
+        with col_inc:
+            fig_inc = go.Figure()
+            fig_inc.add_trace(go.Bar(
+                x=df_hist["Exposure_Days"], y=df_hist["Daily_Damage_Increment"] * 100,
+                name="Daily Δ Damage", marker_color="#8B5CF6", opacity=0.85
+            ))
+            fig_inc.update_layout(
+                title=dict(text="<b>Model Target: Daily Increment (Δ Damage)</b>", font=dict(size=13, color="#1E293B"), x=0.02),
+                xaxis=dict(title="Exposure Days", showgrid=True, gridcolor="#F1F5F9"),
+                yaxis=dict(title="Δ Damage (%)", showgrid=True, gridcolor="#F1F5F9"),
+                height=280,
+                margin=dict(l=15, r=15, t=45, b=15),
+                plot_bgcolor="white", paper_bgcolor="white", showlegend=False
+            )
+            st.plotly_chart(fig_inc, width='stretch', config=PLOTLY_CONFIG)
 
 def general_overview() -> None:
     """Render the "General Overview" page: fleet KPIs, telemetry, and Digital Twin diagnostics."""
@@ -1663,7 +1867,6 @@ def general_overview() -> None:
     fleet_df = load_global_data()
     ml_artifacts = load_ml_artifacts()
     survival_df = load_survival_data()
-    df_twin_diag = load_twin_diagnostics()
     df_pce_norm = load_pce_norm_data()
     df_pff_pred = load_pff_pred_data()
     alert_thresholds = ml_artifacts.get("alert_thresholds", {})
@@ -1813,11 +2016,22 @@ def general_overview() -> None:
             _null_future_and_capped(df_summary_dyn, [("t80_failure_date", "survival_days")], max_t)
             _null_future_and_capped(df_summary_dyn, [("ml_alert_date", "threshold_pct_day")], max_t)
 
+    df_daily = load_rul_matrix()
+    df_sim_sensor = load_rul_sim_sensor()
+    df_sim_api = load_rul_sim_api()
+
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
     _render_physical_tracking_expander(df_summary_dyn, ml_artifacts, df_pff_pred, df_pce_norm, active_cells_window, plot_df, selected_metric, resolution_rules)
+
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
     _render_combined_twin_audit_expander(df_summary_dyn, ml_artifacts, alert_thresholds, active_cells_window, survival_naive_df, max_t)
+
+    st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+    # Inyectar el nuevo expander específico para Forecasting RUL
+    _render_rul_simulation_expander(df_daily, df_sim_sensor, df_sim_api, target_cell="ASLRXAB341")
+
     st.markdown("<hr style='margin: 3rem 0; opacity: 0.5;'>", unsafe_allow_html=True)
+
 
     # =================================================================
     # Section: Photovoltaic Performance & Telemetry
