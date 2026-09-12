@@ -1,5 +1,5 @@
 """
-Module: src/t80_survival_tracker.py
+Module: src/06_jv_mppt_t80_tracker.py
 Description: Physical lifecycle tracking for outdoor perovskite devices.
 Computes the initial performance peak (PCE and pFF) within the first 3 days,
 establishes the T80 thresholds (80% of peak), and tracks the time-series
@@ -8,7 +8,7 @@ Outputs a clean metrics table used by downstream Machine Learning modules.
 """
 
 import logging
-from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -165,18 +165,18 @@ def generate_t80_metrics_table(df: pd.DataFrame, irradiance_threshold: float = D
     return pd.DataFrame(results).set_index('cell_name')
 
 if __name__ == "__main__":
-    SURVIVAL_DIR = Path("data/survival/outdoor")
-    survival_file = SURVIVAL_DIR / "survival_dataset.parquet"
-    METRICS_OUT = SURVIVAL_DIR / "t80_metrics_table.parquet"
-    
-    if not survival_file.exists():
-        logger.error(f"Input file not found: {survival_file}")
+    from src.config import FILE_MERGED_FEATURES, FILE_T80_TRUTH
+
+    FILE_T80_TRUTH.parent.mkdir(parents=True, exist_ok=True)   
+
+    if not FILE_MERGED_FEATURES.exists():
+        logger.error(f"Input file not found: {FILE_MERGED_FEATURES}")
     else:
         logger.info("Tracking T80 physical lifecycle...")
-        df_raw = pd.read_parquet(survival_file)
+        df_raw = pd.read_parquet(FILE_MERGED_FEATURES)
         t80_metrics = generate_t80_metrics_table(df_raw)
         
-        t80_metrics.to_parquet(METRICS_OUT, engine='pyarrow', compression='snappy')
-        logger.info(f"Exported T80 metrics table for {len(t80_metrics)} devices to: {METRICS_OUT}")
+        t80_metrics.to_parquet(FILE_T80_TRUTH, engine='pyarrow', compression='snappy')
+        logger.info(f"Exported T80 metrics table for {len(t80_metrics)} devices to: {FILE_T80_TRUTH}")
         print("\n--- Physical Health Overview ---")
         print(t80_metrics[['PCE_initial', 'combined_survival_days']].head())

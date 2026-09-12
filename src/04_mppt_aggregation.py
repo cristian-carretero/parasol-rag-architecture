@@ -1,16 +1,21 @@
 """
-Module: src/data_aggregation.py
+Module: src/04_mppt_aggregation.py
 Description: Downsamples and aggregates high-resolution Parquet telemetry (MPP, Meteo) 
 into synchronized 10-minute intervals per device. Employs causal resampling (right-closed) 
 and strict outer joins on the shared temporal index. Computes active 
 Power Conversion Efficiency (PCE) and compiles a unified fleet-wide dataset.
 """
 
-from pathlib import Path
 import pandas as pd
 import logging
 
-from src.config import CELL_AREA_M2, DAYLIGHT_IRRADIANCE_MIN_W_M2
+from src.config import (
+    CELL_AREA_M2,
+    DAYLIGHT_IRRADIANCE_MIN_W_M2,
+    DIR_PROCESSED,
+    DIR_AGGREGATED,
+    FILE_TELEMETRY_10MIN,
+)
 
 # Professional MLOps logging configuration
 logging.basicConfig(
@@ -19,16 +24,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DataAggregation")
 
-PROCESSED_DIR = Path("data/processed/outdoor")
-AGGREGATED_DIR = Path("data/aggregated/outdoor")
-
 def aggregate_device_data(device_id: str) -> None:
     """
     Processes and merges meteorological and MPPT data for a single physical device,
     resampling to a common 10-minute frequency and calculating continuous PCE.
     """
-    device_PROCESSED_DIR = PROCESSED_DIR / device_id
-    device_agg_dir = AGGREGATED_DIR / device_id
+    device_PROCESSED_DIR = DIR_PROCESSED / device_id
+    device_agg_dir = DIR_AGGREGATED / device_id
     device_agg_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"=== Aggregating device telemetry for: {device_id} ===")
@@ -118,7 +120,7 @@ def aggregate_fleet_data(device_ids: list) -> None:
 
     # 1. Gather global Meteorological Data
     for device_id in device_ids:
-        meteo_file = PROCESSED_DIR / device_id / f"{device_id}_meteo.parquet"
+        meteo_file = DIR_PROCESSED / device_id / f"{device_id}_meteo.parquet"
         if meteo_file.exists():
             try:
                 df = pd.read_parquet(meteo_file)
@@ -158,7 +160,7 @@ def aggregate_fleet_data(device_ids: list) -> None:
 
     # 2. Iteratively append isolated MPP Data per device & Compute distributed PCE
     for device_id in device_ids:
-        mpp_file = PROCESSED_DIR / device_id / f"{device_id}_mpp.parquet"
+        mpp_file = DIR_PROCESSED / device_id / f"{device_id}_mpp.parquet"
         if mpp_file.exists():
             try:
                 df_mpp = pd.read_parquet(mpp_file)
@@ -191,19 +193,18 @@ def aggregate_fleet_data(device_ids: list) -> None:
                 logger.error(f"Error executing horizontal merge for fleet device {device_id}: {e}")
 
     # 3. Serialize Unified Fleet Architecture
-    AGGREGATED_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = AGGREGATED_DIR / "meteo_mppt_10min.parquet"
-    
-    fleet_dataset.reset_index().to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
-    logger.info(f"\n✅ Fleet consolidation successful. Master architecture serialized to: {output_path}")
+    FILE_TELEMETRY_10MIN.parent.mkdir(parents=True, exist_ok=True)
+
+    fleet_dataset.reset_index().to_parquet(FILE_TELEMETRY_10MIN, engine='pyarrow', compression='snappy', index=False)
+    logger.info(f"\n✅ Fleet consolidation successful. Master architecture serialized to: {FILE_TELEMETRY_10MIN}")
 
 def process_all_data() -> None:
     """Orchestrator logic mapping isolated environments into continuous aggregated schemas."""
-    if not PROCESSED_DIR.exists():
-        logger.error(f"Target telemetry directory '{PROCESSED_DIR}' does not exist.")
+    if not DIR_PROCESSED.exists():
+        logger.error(f"Target telemetry directory '{DIR_PROCESSED}' does not exist.")
         return
 
-    device_dirs = [d.name for d in PROCESSED_DIR.iterdir() if d.is_dir()]
+    device_dirs = [d.name for d in DIR_PROCESSED.iterdir() if d.is_dir()]
     if not device_dirs:
         return
 

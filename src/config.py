@@ -3,12 +3,87 @@ Module: src/config.py
 Description: Central configuration for the ParaSol pipeline, ordered to
 follow the execution flow: telemetry alignment -> filtering/QC ->
 T80 survival labeling -> early screening (digital twin) -> XAI surrogates
--> clustering -> RUL forecasting -> dashboard. Every tunable threshold,
-tolerance, or hyperparameter lives here so changing one value updates
-every module that depends on it.
+-> clustering -> RUL forecasting -> multivariate trajectory forecasting -> dashboard.
+Every tunable threshold, tolerance, or hyperparameter lives here so changing
+one value updates every module that depends on it.
 """
 
 import pandas as pd
+from pathlib import Path
+
+# ==========================================
+# FILE SYSTEM REGISTRY (PIPELINE ARTIFACTS)
+# ==========================================
+BASE_DATA_DIR = Path("data")
+RAW_DIR = BASE_DATA_DIR / "raw/outdoor"
+# Raw input: per-device CSVs (<device_id>/{mpp,jv,meteo}.csv). Immutable source of truth.
+
+# [01_ingest_raw.py] ── Ingestion & Parquet serialization
+DIR_PROCESSED = BASE_DATA_DIR / "processed/outdoor"
+# Per-device Parquet artifacts: <DIR_PROCESSED>/<device_id>/<device_id>_{mpp,jv,meteo}.parquet
+# Columns: Timestamp (UTC), Voltage_V, Current_A, Power_W (mpp) | ScanDirection (jv) |
+#          POA_Irradiance_W_m2, ModuleTemp_C, AbsoluteHumidity_g_m3 (meteo).
+
+# [02_jv_filtering.py] ── Physical QC, artifact removal, & physics extraction
+DIR_FILTERED = BASE_DATA_DIR / "filtered/outdoor"
+FILE_JV_FILTERED = DIR_FILTERED / "02_jv_filtered.parquet"
+# Point-level J-V sweeps with QC boolean masks and extracted physical scalars (Voc, Jsc, FF, P_mpp).
+FILE_FILTERING_META = BASE_DATA_DIR / "filtered/metadata/outdoor/02_valid_curves_summary.json"
+# Per-cell valid curve counts: {"<cell_name>": <n_valid>, ...}.
+
+# [03_jv_clustering.py] ── Morphological state extraction (PCA + K-Medoids)
+DIR_CLUSTERED = BASE_DATA_DIR / "clustered/outdoor"
+FILE_JV_LABELED = DIR_CLUSTERED / "03_jv_clustered.parquet"
+# FILE_JV_FILTERED + {label_curve (int, -1 = pruned), pseudo_FF (float)}.
+FILE_CLUSTERING_ARTIFACTS = BASE_DATA_DIR / "clustered/artifacts/03_clustering_artifacts.joblib"
+# Serialized dict: pca_model, kmedoids_model, labels, cluster_metrics, ...
+
+# [04_mppt_aggregation.py] ── 10-min fleet telemetry + PCE
+DIR_AGGREGATED = BASE_DATA_DIR / "aggregated/outdoor"
+FILE_TELEMETRY_10MIN = DIR_AGGREGATED / "04_meteo_mppt_10min.parquet"
+# Fleet-wide 10-min resampled telemetry. Columns: POA_Irradiance_W_m2, AbsoluteHumidity_g_m3,
+# ModuleTemp_{Mean,Median,Min,Max}_C, and per-device {PCE, Power_W, ModuleTemp}_<device_id>.
+
+# [05_merge_jv_mppt.py] ── Feature matrix (X): J-V curves + aligned telemetry + physical features
+DIR_DATASET = BASE_DATA_DIR / "dataset/outdoor"
+FILE_MERGED_FEATURES = DIR_DATASET / "05_jv_mppt_merged.parquet"
+# One row per J-V curve with aligned telemetry, physical parameters (Voc, Jsc, FF), and cumulative stressors.
+
+# [06_jv_mppt_t80_tracker.py] ── Ground truth (y): T80 collapse day per cell
+FILE_T80_TRUTH = DIR_DATASET / "06_t80_ground_truth.parquet"
+# Per-cell survival metrics. Columns: {PCE,pFF}_initial, T80_threshold_*,
+# survival_days_{pce,pff}, t80_failure_date_{pce,pff},
+# combined_survival_days, combined_failure_date.
+
+# [07_jv_mppt_early_screening.py] ── Digital Twin + LOOCV gate
+# Layout: data/screening/{outdoor/, artifacts/}
+#   - outdoor/    → action-window cohort parquet (data per cell)
+#   - artifacts/  → serialized models, thresholds, and grid-search results
+DIR_SCREENING = BASE_DATA_DIR / "screening/outdoor"
+DIR_SCREENING_ARTIFACTS = BASE_DATA_DIR / "screening/artifacts"
+
+# Action-window telemetry with Digital Twin predictions and ML alert flags.
+FILE_HEALTHY_COHORT = DIR_SCREENING / "07_early_screened_cohort.parquet"
+# Columns: cell_name, Timestamp, Exposure_Days, PCE, pFF, environmental
+# features, Twin_{PCE,pFF}_Pred, Underperformance_*, Alert_*, Digital_Twin_Alert.
+
+FILE_SCREENING_ARTIFACTS = DIR_SCREENING_ARTIFACTS / "07_early_screening_artifacts.joblib"
+# Serialized dict: summary_table, {screening,gated_out,healthy}_cohort,
+# alert_thresholds, model_pce, model_pff.
+
+FILE_BURN_IN_GRID = DIR_SCREENING_ARTIFACTS / "07_burn_in_grid_search.parquet"
+# Phase-1 sensitivity search over candidate burn-in windows (BURN_IN_GRID_WINDOWS).
+# Columns: Window_Days, Healthy_Cells_N, Q98_PCE_Raw, Q98_pFF_Raw,
+#          LOOCV_MAE_PCE, LOOCV_MAE_pFF.
+
+# [08_mppt_rul_forecasting.py] ── RUL prognosis & API calibration
+DIR_RUL = BASE_DATA_DIR / "rul"
+FILE_RUL_TARGETS = DIR_RUL / "08_mppt_rul_targets.parquet"
+# Consolidated RUL target per cell: {cell_name, last_anchor_day, rul_pred_days, true_survival_days}.
+
+# [09_jv_mppt_trajectory_forecasting.py] ── Multivariate kinematic trajectory engines
+FILE_TRAJECTORY_MODELS = DIR_RUL / "09_trajectory_models.joblib"
+# Serialized dictionary of XGBoost models for physical parameters (PCE, pFF, Voc, Jsc).
 
 # ==============================================================================
 # 0. PHYSICAL / OPTICAL CONSTANTS (used across every stage)
@@ -29,7 +104,7 @@ PCE_INITIAL_REF_FLOOR = 1e-3
 RANDOM_STATE = 42
 
 # ==============================================================================
-# 1. TELEMETRY ALIGNMENT (survival_dataset.py)
+# 1. TELEMETRY ALIGNMENT
 # ==============================================================================
 # Tolerance for the causal backward merge_asof between J-V curves and
 # aggregated telemetry, to prevent stale sensor data from crossing gaps.
@@ -44,7 +119,7 @@ OPERATIONAL_HOUR_START = 6
 OPERATIONAL_HOUR_END = 22
 
 # ==============================================================================
-# 3. T80 PHYSICAL SURVIVAL TRACKING (t80_survival_tracker.py)
+# 3. T80 PHYSICAL SURVIVAL TRACKING
 # ==============================================================================
 # Fraction of the initial (Day 0-3) peak PCE/pFF that defines the T80 death
 # threshold (80% of peak).
@@ -61,7 +136,7 @@ T80_PCE_CONFIRM_IRRADIANCE_MIN_W_M2 = 400.0
 T80_CONFIRM_CONSECUTIVE_DAYS = 3
 
 # ==============================================================================
-# 4. SHARED MODEL FEATURES (early_screening.py, xai_*.py)
+# 4. SHARED MODEL FEATURES
 # ==============================================================================
 FEATURES = [
     'POA_Irradiance_W_m2',
@@ -86,7 +161,7 @@ XAI_PHYSICAL_FEATURES = [
 ]
 
 # ==============================================================================
-# 5. EARLY SCREENING / DIGITAL TWIN (early_screening.py)
+# 5. EARLY SCREENING / DIGITAL TWIN
 # ==============================================================================
 # Length of the "action window": how many days of early exposure are
 # evaluated for ML anomaly alerts. Also used by the dashboard as the
@@ -107,8 +182,7 @@ MIN_PHYSICAL_MAE_PFF = 0.035
 ALERT_FREQUENCY_THRESHOLD_PCT = 50.0
 
 # Quantile of in-sample residuals used to set the per-metric alert threshold
-# (e.g. 0.98 -> "98th percentile"). Used both for training (early_screening.py)
-# and for the empirical audit chart (streamlit_app.py).
+# (e.g. 0.98 -> "98th percentile"). Used both for training and for the empirical audit chart.
 RESIDUAL_ALERT_QUANTILE = 0.98
 
 # XGBoost hyperparameters for the Dual Digital Twin (shared by the production
@@ -123,7 +197,7 @@ XGB_PFF_PARAMS = dict(
 )
 
 # ==============================================================================
-# 6. XAI SURROGATE MODELS (xai_physical_forensic.py, xai_digital_twin.py)
+# 6. XAI SURROGATE MODELS
 # ==============================================================================
 # Shared DecisionTreeClassifier hyperparameters for both the physical-forensic
 # and ML-alert surrogate explainers.
@@ -139,30 +213,26 @@ FEATURE_IMPORTANCE_MIN = 0.05
 PRODROMAL_WINDOW_DAYS = 3.0
 
 # Cells whose T80 collapse happens at or before this many days are treated as
-# early/infant-mortality failures worth forensic analysis. Reuses BURN_IN_DAYS
-# since both represent "the early-life action window".
+# early/infant-mortality failures worth forensic analysis.
 EARLY_FAILURE_WINDOW_DAYS = BURN_IN_DAYS
 
 # Sample size used to keep the global SHAP beeswarm plot tractable.
 SHAP_SAMPLE_SIZE = 5000
 
 # ==============================================================================
-# 7. CLUSTERING (clustering.py, viz_clustering.py)
+# 7. CLUSTERING
 # ==============================================================================
 # Target cumulative explained variance for automatic PCA component selection
 # and its corresponding diagnostic reference line.
 PCA_TARGET_EXPLAINED_VARIANCE = 0.90
 
 # ==============================================================================
-# 8. RUL FORECASTING & API CALIBRATION (rul_forecasting.py)
+# 8. RUL FORECASTING & MULTIVARIATE TRAJECTORIES
 # ==============================================================================
 DEFAULT_LAT = 41.6833
 DEFAULT_LON = -0.8833
 
-# Hiperparámetros separados por métrica: reg_lambda=10.0 compartido colapsaba
-# el modelo de pFF a una constante (feature_importances_ = [0,0,0,0,0,0]),
-# porque su target tiene ~52% de ceros y escala pequeña (0.003-0.07) frente
-# al de PCE. Confirmado por diagnóstico antes de separar.
+# Hyperparameters separated by metric to prevent regularization collapse
 XGB_PARAMS_RUL_PCE = dict(
     n_estimators=200, learning_rate=0.03, max_depth=3,
     subsample=0.75, colsample_bytree=0.8, reg_lambda=10.0,
@@ -173,3 +243,27 @@ XGB_PARAMS_RUL_PFF = dict(
     subsample=0.75, colsample_bytree=0.8, reg_lambda=1.0,
     reg_alpha=0.0, random_state=RANDOM_STATE, n_jobs=-1
 )
+
+# ==============================================================================
+# 9. OUTPUT ARTIFACTS (HUMAN-READABLE: FIGURES, DIAGNOSTICS)
+# ==============================================================================
+# Outputs are regenerable and gitignored, distinct from `data/` pipeline
+# artifacts. Kept under a single root to make cleanup and packaging trivial.
+BASE_OUTPUTS_DIR = Path("outputs")
+FIGURES_DIR = BASE_OUTPUTS_DIR / "figures"
+DIAGNOSTICS_DIR = BASE_OUTPUTS_DIR / "diagnostics"
+
+# Per-module figure directories, named after the pipeline stage they illustrate.
+FIGURES_FILTERING_DIR = FIGURES_DIR / "filtering"
+FIGURES_CLUSTERING_DIR = FIGURES_DIR / "clustering"
+FIGURES_SCREENING_DIR = FIGURES_DIR / "screening"
+FIGURES_XAI_DIR = FIGURES_DIR / "xai"
+FIGURES_RUL_DIR = FIGURES_DIR / "rul"
+
+# ==============================================================================
+# 10. DEPLOYMENT CONTEXT
+# ==============================================================================
+# Deployment-local timezone. Raw timestamps are stored in UTC for DST-safe
+# merging, but every operational-hour window (daylight filtering, chronometric
+# diagnostics) is defined in local time and must be converted before use.
+DEPLOYMENT_TIMEZONE = "Europe/Madrid"

@@ -1,0 +1,75 @@
+{
+    "M0": {
+        "T80_Day": 4.002557685208333,
+        "Feature_Importances": {
+            "AbsoluteHumidity_g_m3": 0.572827230229512,
+            "ModuleTemp_C": 0.34459228907663664,
+            "POA_Irradiance_W_m2": 0.08258048069385139
+        },
+        "Rules": [
+            "|--- AbsoluteHumidity_g_m3 <= 6.6",
+            "|   |--- ModuleTemp_C <= 23.9",
+            "|   |   |--- class: 0",
+            "|   |--- ModuleTemp_C >  23.9",
+            "|   |   |--- class: 0",
+            "|--- AbsoluteHumidity_g_m3 >  6.6",
+            "|   |--- ModuleTemp_C <= 32.0",
+            "|   |   |--- POA_Irradiance_W_m2 <= 873.0",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- POA_Irradiance_W_m2 >  873.0",
+            "|   |   |   |--- class: 0",
+            "|   |--- ModuleTemp_C >  32.0",
+            "|   |   |--- class: 1"
+        ]
+    },
+    "A170AB302": {
+        "T80_Day": 6.40129946170139,
+        "Feature_Importances": {
+            "AbsoluteHumidity_g_m3": 0.8432603553551123,
+            "ModuleTemp_C": 0.15432369775336643
+        },
+        "Rules": [
+            "|--- AbsoluteHumidity_g_m3 <= 6.0",
+            "|   |--- POA_Irradiance_W_m2 <= 250.2",
+            "|   |   |--- class: 0",
+            "|   |--- POA_Irradiance_W_m2 >  250.2",
+            "|   |   |--- class: 0",
+            "|--- AbsoluteHumidity_g_m3 >  6.0",
+            "|   |--- AbsoluteHumidity_g_m3 <= 8.0",
+            "|   |   |--- ModuleTemp_C <= 19.9",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- ModuleTemp_C >  19.9",
+            "|   |   |   |--- class: 1",
+            "|   |--- AbsoluteHumidity_g_m3 >  8.0",
+            "|   |   |--- ModuleTemp_C <= 37.2",
+            "|   |   |   |--- class: 0",
+            "|   |   |--- ModuleTemp_C >  37.2",
+            "|   |   |   |--- class: 0"
+        ]
+    },
+    "A162ALXP01": {
+        "T80_Day": 9.394881494351852,
+        "Feature_Importances": {
+            "AbsoluteHumidity_g_m3": 0.8996425428465957,
+            "ModuleTemp_C": 0.07113892218393503
+        },
+        "Rules": [
+            "|--- AbsoluteHumidity_g_m3 <= 6.7",
+            "|   |--- AbsoluteHumidity_g_m3 <= 5.5",
+            "|   |   |--- Delta_Hum_g_m3_per_h <= -1.2",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- Delta_Hum_g_m3_per_h >  -1.2",
+            "|   |   |   |--- class: 0",
+            "|   |--- AbsoluteHumidity_g_m3 >  5.5",
+            "|   |   |--- ModuleTemp_C <= 25.4",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- ModuleTemp_C >  25.4",
+            "|   |   |   |--- class: 1",
+            "|--- AbsoluteHumidity_g_m3 >  6.7",
+            "|   |--- AbsoluteHumidity_g_m3 <= 6.8",
+            "|   |   |--- class: 0",
+            "|   |--- AbsoluteHumidity_g_m3 >  6.8",
+            "|   |   |--- class: 0"
+        ]
+    }
+}

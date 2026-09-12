@@ -1,5 +1,5 @@
 """
-Module: src/data_processing.py
+Module: src/01_ingest_raw.py
 Description: Ingestion, cleaning, and mass conversion of raw telemetry (CSV) 
 into optimized columnar Parquet format for outdoor cells.
 Implements true disk-to-disk streaming to prevent Out-Of-Memory (OOM) failures,
@@ -15,16 +15,14 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.config import RAW_DIR, DIR_PROCESSED
+
 # Professional MLOps logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("DataProcessing")
-
-# Project directory definitions
-RAW_DIR = Path("data/raw/outdoor")
-PROCESSED_DIR = Path("data/processed/outdoor")
 
 
 def _write_globally_sorted_chunks(chunks, output_path: Path) -> int:
@@ -105,7 +103,7 @@ def process_device_data(device_id: str) -> None:
     files, applying memory downcasting and strict temporal normalization.
     """
     device_raw_dir = RAW_DIR / device_id
-    device_processed_dir = PROCESSED_DIR / device_id
+    device_processed_dir = DIR_PROCESSED / device_id
     device_processed_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"=== Processing device: {device_id} ===")
@@ -209,4 +207,5 @@ def process_all_devices() -> None:
     logger.info("Data Engineering pipeline successfully terminated. All artifacts serialized to Parquet.")
 
 if __name__ == "__main__":
+    DIR_PROCESSED.mkdir(parents=True, exist_ok=True)
     process_all_devices()

@@ -1,0 +1,57 @@
+{
+    "P12": {
+        "ML_Alert_Day": 0.9224406745833333,
+        "Feature_Importances": {
+            "ModuleTemp_C": 0.6341107871720272,
+            "Delta_Temp_C_per_h": 0.2261463591647685,
+            "AbsoluteHumidity_g_m3": 0.13974285366320427
+        },
+        "Rules": [
+            "|--- ModuleTemp_C <= 31.8",
+            "|   |--- Delta_Temp_C_per_h <= -0.9",
+            "|   |   |--- class: 1",
+            "|   |--- Delta_Temp_C_per_h >  -0.9",
+            "|   |   |--- AbsoluteHumidity_g_m3 <= 9.4",
+            "|   |   |   |--- class: 0",
+            "|   |   |--- AbsoluteHumidity_g_m3 >  9.4",
+            "|   |   |   |--- class: 1",
+            "|--- ModuleTemp_C >  31.8",
+            "|   |--- ModuleTemp_C <= 31.9",
+            "|   |   |--- class: 1",
+            "|   |--- ModuleTemp_C >  31.9",
+            "|   |   |--- class: 1"
+        ]
+    },
+    "M0": {
+        "ML_Alert_Day": 2.884597907256944,
+        "Feature_Importances": {
+            "AbsoluteHumidity_g_m3": 0.5871424725954014,
+            "ModuleTemp_C": 0.333326335512088,
+            "Delta_Temp_C_per_h": 0.05618537671560496
+        },
+        "Rules": [
+            "|--- AbsoluteHumidity_g_m3 <= 7.2",
+            "|   |--- ModuleTemp_C <= 33.2",
+            "|   |   |--- POA_Irradiance_W_m2 <= 631.1",
+            "|   |   |   |--- class: 0",
+            "|   |   |--- POA_Irradiance_W_m2 >  631.1",
+            "|   |   |   |--- class: 0",
+            "|   |--- ModuleTemp_C >  33.2",
+            "|   |   |--- ModuleTemp_C <= 33.7",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- ModuleTemp_C >  33.7",
+            "|   |   |   |--- class: 1",
+            "|--- AbsoluteHumidity_g_m3 >  7.2",
+            "|   |--- ModuleTemp_C <= 27.7",
+            "|   |   |--- Delta_Temp_C_per_h <= 9.3",
+            "|   |   |   |--- class: 0",
+            "|   |   |--- Delta_Temp_C_per_h >  9.3",
+            "|   |   |   |--- class: 1",
+            "|   |--- ModuleTemp_C >  27.7",
+            "|   |   |--- AbsoluteHumidity_g_m3 <= 7.2",
+            "|   |   |   |--- class: 1",
+            "|   |   |--- AbsoluteHumidity_g_m3 >  7.2",
+            "|   |   |   |--- class: 1"
+        ]
+    }
+}

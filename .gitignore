@@ -9,6 +9,13 @@ __pycache__/
 # Data (do not version heavy files)
 data/
 
+# Generated figures — heavy, regenerable from the pipeline
+outputs/figures/
+
+# Diagnostics (JSON rule trees, audit summaries) are versioned:
+# they are small text reports and serve as a historical reference of each run.
+# No ignore rule needed for outputs/diagnostics/.
+
 # System or IDE files
 .DS_Store
 .vscode/

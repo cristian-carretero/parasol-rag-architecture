@@ -1,5 +1,5 @@
 """
-Module: src/early_screening.py
+Module: src/07_jv_mppt_early_screening.py
 Description: Infant mortality screening and LOOCV gate.
 Phase 1: Executes an empirical Grid Search to determine the optimal burn-in window.
 Phase 2: Uses the pre-calculated physical health (T80) to isolate the mature phase
@@ -7,7 +7,6 @@ of healthy cells and trains a Dual Digital Twin (PCE & pFF) for rapid anomaly de
 """
 
 import logging
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 import joblib
@@ -25,10 +24,9 @@ from src.config import (
     MIN_PHYSICAL_MAE_PFF,
     PCE_INITIAL_REF_FLOOR,
     RESIDUAL_ALERT_QUANTILE,
-    T80_FRACTION,
     XGB_PCE_PARAMS,
     XGB_PFF_PARAMS,
-)
+    )
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
@@ -273,23 +271,26 @@ def run_burn_in_grid_search(
 # MAIN EXECUTION
 # ==============================================================================
 def main():
-    SURVIVAL_DIR = Path("data/survival/outdoor")
-    ANOMALY_DIR = Path("data/anomaly/outdoor")
-    DIAGNOSTICS_DIR = Path("data/anomaly/diagnostics/")
-    
-    ANOMALY_DIR.mkdir(parents=True, exist_ok=True)
-    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    from src.config import (
+    FILE_MERGED_FEATURES,
+    FILE_T80_TRUTH,
+    FILE_HEALTHY_COHORT,
+    FILE_SCREENING_ARTIFACTS,
+    )
+
+    FILE_HEALTHY_COHORT.parent.mkdir(parents=True, exist_ok=True)
+    FILE_SCREENING_ARTIFACTS.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        df_final = pd.read_parquet(SURVIVAL_DIR / "survival_dataset.parquet")
-        t80_metrics = pd.read_parquet(SURVIVAL_DIR / "t80_metrics_table.parquet")
+        df_final = pd.read_parquet(FILE_MERGED_FEATURES)
+        t80_metrics = pd.read_parquet(FILE_T80_TRUTH)
     except FileNotFoundError:
-        logger.error("Missing input files. Ensure t80_survival_tracker.py has been executed.")
+        logger.error("Missing input files. Ensure 06_jv_mppt_t80_tracker.py has been executed.")
         return
 
     # PHASE 1: GRID SEARCH
     grid_results = run_burn_in_grid_search(df_final, t80_metrics, windows=BURN_IN_GRID_WINDOWS)
-    grid_parquet_path = DIAGNOSTICS_DIR / "burn_in_grid_search.parquet"
+    grid_parquet_path = FILE_SCREENING_ARTIFACTS.parent / "07_burn_in_grid_search.parquet"
     grid_results.to_parquet(grid_parquet_path, engine='pyarrow')
     logger.info(f"Grid search results exported to: {grid_parquet_path.name}")
 
@@ -336,9 +337,9 @@ def main():
         "alert_thresholds": final_thresholds,
         "model_pce": dt_models_final['pce'],
         "model_pff": dt_models_final['pff']
-    }, Path("data/anomaly/artifacts/early_failure_artifacts.joblib"))
+    }, FILE_SCREENING_ARTIFACTS)
 
-    df_twin_final.to_parquet(ANOMALY_DIR / "anomaly_scored_dataset.parquet", engine='pyarrow')
+    df_twin_final.to_parquet(FILE_HEALTHY_COHORT, engine='pyarrow')
     logger.info("Pipeline execution completed successfully.")
 
 if __name__ == "__main__":

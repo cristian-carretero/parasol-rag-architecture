@@ -1,5 +1,5 @@
 """
-Module: src/survival_dataset.py
+Module: src/05_merge_jv_mppt.py
 Description: Feature engineering for predictive maintenance and survival analysis.
 Groups J-V scans by curve, computes cumulative environmental stressors (doses), 
 and aligns continuous telemetry using strict causal backward merging.
@@ -38,7 +38,11 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
     logger.info("Collapsing intra-day curves to extract structural features...")
     df_curves = df_labeled.groupby(['cell_name', 'cell_id', 'curve', 'label_curve']).agg(
         Timestamp=('Timestamp', 'min'),
-        pFF=('pseudo_FF', 'first')
+        pFF=('pseudo_FF', 'first'),
+        Voc=('voc', 'first'),
+        Jsc=('jsc', 'first'),
+        FF=('ff', 'first'),
+        P_mpp=('p_mpp', 'first')
     ).reset_index()
     
     # Enforce UTC and chronological sort to prevent merge_asof timezone collapse
@@ -185,25 +189,27 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
 
 
 if __name__ == "__main__":
-    # Pipeline configuration paths
-    LABELED_DIR = Path("data/clustered/outdoor")
-    AGGREGATED_FILE = Path("data/aggregated/outdoor/meteo_mppt_10min.parquet")
-    SURVIVAL_DIR = Path("data/survival/outdoor")
-    
-    jv_labeled_file = LABELED_DIR / "jv_dataset_labeled.parquet"
-    out_file = SURVIVAL_DIR / "survival_dataset.parquet"
+    from src.config import FILE_JV_LABELED, FILE_TELEMETRY_10MIN, FILE_MERGED_FEATURES
+
+    FILE_MERGED_FEATURES.parent.mkdir(parents=True, exist_ok=True)
 
     # Pipeline execution
-    if jv_labeled_file.exists() and AGGREGATED_FILE.exists():
+    if FILE_JV_LABELED.exists() and FILE_TELEMETRY_10MIN.exists():
         df_final = build_survival_features(
-            jv_labeled_path=jv_labeled_file, 
-            aggregated_path=AGGREGATED_FILE,   
-            output_path=out_file
+            jv_labeled_path=FILE_JV_LABELED,
+            aggregated_path=FILE_TELEMETRY_10MIN,
+            output_path=FILE_MERGED_FEATURES,
         )
         
         if not df_final.empty:
             print("\nPreview of the instantaneous and cumulative integrated data:")
             preview_cols = ['cell_name', 'Timestamp', 'POA_Irradiance_W_m2', 'PCE', 'Hour_Sin', 'Hour_Cos', 'Day_Sin', 'Day_Cos']
             print(df_final[preview_cols].head())
+        else:
+            logger.error("build_survival_features returned an empty DataFrame.")
     else:
-        logger.error(f"Missing required input datasets. Check paths:\n- {jv_labeled_file}\n- {AGGREGATED_FILE}")
+        logger.error(
+            f"Missing required input datasets. Check paths:\n"
+            f"- {FILE_JV_LABELED}\n"
+            f"- {FILE_TELEMETRY_10MIN}"
+        )

@@ -1,5 +1,5 @@
 """
-Module: src/clustering.py
+Module: src/03_jv_clustering.py
 Description: Feature engineering, PCA dimensionality reduction, and K-Medoids 
 clustering for J-V curve morphological state extraction. Targets the complete 
 hysteresis loop to capture thermodynamic degradation independent of irradiance.
@@ -420,22 +420,23 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
 
-    FILTERED_DIR = Path("data/filtered/outdoor")
-    CLUSTERED_DIR = Path("data/clustered/outdoor")
-    CLUSTERED_DIR.mkdir(parents=True, exist_ok=True)
-    ARTIFACTS_DIR = Path("data/clustered/artifacts")
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    from src.config import (
+    FILE_JV_FILTERED,
+    FILE_JV_LABELED,
+    FILE_CLUSTERING_ARTIFACTS,
+    )
 
-    filtered_parquet_path = FILTERED_DIR / "jv_dataset_filtered.parquet"
+    FILE_JV_LABELED.parent.mkdir(parents=True, exist_ok=True)
+    FILE_CLUSTERING_ARTIFACTS.parent.mkdir(parents=True, exist_ok=True)
 
-    if not filtered_parquet_path.exists():
-        logger.error(f"Filtered artifact missing: {filtered_parquet_path}. Aborting.")
+    if not FILE_JV_FILTERED.exists():
+        logger.error(f"Filtered artifact missing: {FILE_JV_FILTERED}. Aborting.")
         exit(1)
 
     logger.info("Initializing Iterative Clustering pipeline...")
     logger.info("Loading filtered dataset into memory...")
     jv_clean = pd.read_parquet(
-        filtered_parquet_path,
+    FILE_JV_FILTERED,
         filters=[('is_curve_valid', '==', 1)]
     )
 
@@ -512,7 +513,7 @@ if __name__ == "__main__":
     
     # Reload raw dataset from disk for final merging
     jv_clean = pd.read_parquet(
-        filtered_parquet_path,
+        FILE_JV_FILTERED,
         filters=[('is_curve_valid', '==', 1)]
     )
     
@@ -520,9 +521,8 @@ if __name__ == "__main__":
     jv_labeled = jv_clean.merge(final_labels, on=['cell_id', 'curve'], how='left')
     jv_labeled['label_curve'] = jv_labeled['label_curve'].fillna(-1).astype(int)
     
-    output_path = CLUSTERED_DIR / "jv_dataset_labeled.parquet"
-    jv_labeled.to_parquet(output_path, engine='pyarrow', index=False)
-    logger.info(f"Labeled dataset successfully serialized to: {output_path}")
+    jv_labeled.to_parquet(FILE_JV_LABELED, engine='pyarrow', index=False)
+    logger.info(f"Labeled dataset successfully serialized to: {FILE_JV_LABELED}")
 
     # Serialize decoupled ML artifacts
     artifacts = {
@@ -538,6 +538,5 @@ if __name__ == "__main__":
         "cluster_metrics": ml_results["cluster_metrics"]
     }
 
-    artifacts_path = ARTIFACTS_DIR / "clustering_artifacts.joblib"
-    joblib.dump(artifacts, artifacts_path)
-    logger.info(f"Clustering artifacts successfully serialized to: {artifacts_path}")
+    joblib.dump(artifacts, FILE_CLUSTERING_ARTIFACTS)
+    logger.info(f"Clustering artifacts successfully serialized to: {FILE_CLUSTERING_ARTIFACTS}")
