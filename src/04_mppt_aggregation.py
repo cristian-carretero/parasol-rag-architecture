@@ -24,6 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DataAggregation")
 
+
 def aggregate_device_data(device_id: str) -> None:
     """
     Processes and merges meteorological and MPPT data for a single physical device,
@@ -84,13 +85,18 @@ def aggregate_device_data(device_id: str) -> None:
 
             mask_day = df_merged['POA_Irradiance_W_m2'] > DAYLIGHT_IRRADIANCE_MIN_W_M2
             
-            # Absolute PCE mathematically requires active area normalization
-            df_merged.loc[mask_day, 'PCE'] = (df_merged.loc[mask_day, power_col]) / (df_merged.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2) * 100.0
+            # Absolute PCE mathematically requires active area normalization.
+            # PCE is only physically meaningful under illumination; nighttime
+            # samples are left as NaN (not zeroed) so that downstream daily
+            # aggregates (median/max) are not diluted by 50% nighttime zeros.
+            df_merged.loc[mask_day, 'PCE'] = (
+                df_merged.loc[mask_day, power_col]
+                / (df_merged.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2)
+                * 100.0
+            )
 
-            # Nighttime rows are zeroed out to prevent NaN proliferation downstream
-            df_merged.loc[~mask_day, 'PCE'] = df_merged.loc[~mask_day, 'PCE'].fillna(0)
-
-            # Cap PCE to physical bounds to discard low-irradiance division noise
+            # Cap PCE to physical bounds to discard low-irradiance division noise.
+            # Rows outside the daylight mask remain NaN by design.
             df_merged['PCE'] = df_merged['PCE'].clip(lower=0, upper=100)
             logger.info(f" -> PCE vector computed utilizing column: '{power_col}'")
 
@@ -105,6 +111,7 @@ def aggregate_device_data(device_id: str) -> None:
     output_path = device_agg_dir / f"{device_id}_meteo_mppt_10min.parquet"
     df_merged.to_parquet(output_path, engine='pyarrow', compression='snappy')
     logger.info(f" -> Serialized localized device matrix: {output_path.name} ({len(df_merged):,} records)")
+
 
 def aggregate_fleet_data(device_ids: list) -> None:
     """
@@ -184,8 +191,14 @@ def aggregate_fleet_data(device_ids: list) -> None:
                     mask_day = fleet_dataset['POA_Irradiance_W_m2'] > DAYLIGHT_IRRADIANCE_MIN_W_M2
                     pce_col = f'PCE_{device_id}'
                     
-                    fleet_dataset.loc[mask_day, pce_col] = fleet_dataset.loc[mask_day, power_col] / (fleet_dataset.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2) * 100.0
-                    fleet_dataset.loc[~mask_day, pce_col] = fleet_dataset.loc[~mask_day, pce_col].fillna(0)
+                    # PCE is only defined under illumination. Nighttime samples
+                    # remain NaN to prevent biasing daily aggregates (median,
+                    # max) with a 50% population of artificial zeros.
+                    fleet_dataset.loc[mask_day, pce_col] = (
+                        fleet_dataset.loc[mask_day, power_col]
+                        / (fleet_dataset.loc[mask_day, 'POA_Irradiance_W_m2'] * CELL_AREA_M2)
+                        * 100.0
+                    )
                     fleet_dataset[pce_col] = fleet_dataset[pce_col].clip(lower=0, upper=100)
                     logger.info(f" -> Component PCE_{device_id} mapped and quantified utilizing '{power_col}'.")
 
@@ -197,6 +210,7 @@ def aggregate_fleet_data(device_ids: list) -> None:
 
     fleet_dataset.reset_index().to_parquet(FILE_TELEMETRY_10MIN, engine='pyarrow', compression='snappy', index=False)
     logger.info(f"\n✅ Fleet consolidation successful. Master architecture serialized to: {FILE_TELEMETRY_10MIN}")
+
 
 def process_all_data() -> None:
     """Orchestrator logic mapping isolated environments into continuous aggregated schemas."""
@@ -213,6 +227,7 @@ def process_all_data() -> None:
 
     aggregate_fleet_data(device_dirs)
     logger.info("Data aggregation pipeline sequence successfully terminated.")
+
 
 if __name__ == "__main__":
     process_all_data()

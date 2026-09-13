@@ -38,12 +38,15 @@ from src.config import (
     PRODROMAL_WINDOW_DAYS,
     RESIDUAL_ALERT_QUANTILE,
     T80_FRACTION,
+    ANCHOR_DAY,
     # Pipeline artifacts (centralized paths)
     FILE_TELEMETRY_10MIN,
     FILE_T80_TRUTH,
     FILE_HEALTHY_COHORT,
     FILE_SCREENING_ARTIFACTS,
     FILE_BURN_IN_GRID,
+    FILE_TRAJECTORY_LOOCV,
+    FILE_TRAJECTORY_PRODUCTION,
     DIAGNOSTICS_DIR,
 )
 
@@ -81,6 +84,9 @@ RUL_DIR = Path("data/rul")
 RUL_MATRIX_PATH = RUL_DIR / "08_rul_features_matrix.parquet"
 RUL_SIM_SENSOR_PATH = RUL_DIR / "08_rul_sim_sensor.parquet"
 RUL_SIM_API_PATH = RUL_DIR / "08_rul_sim_api.parquet"
+
+# Trajectory forecasting artifacts (09) — routes via src.config
+# FILE_TRAJECTORY_LOOCV and FILE_TRAJECTORY_PRODUCTION are imported above.
 
 # Empirical threshold audit configuration
 AUDIT_CASE_STUDIES = [
@@ -287,6 +293,24 @@ def load_rul_sim_api() -> pd.DataFrame:
         st.warning(f"Failed to load RUL API simulation data: {exc}")
     return pd.DataFrame()
 
+@st.cache_data(show_spinner=False)
+def load_trajectory_loocv() -> pd.DataFrame:
+    try:
+        if FILE_TRAJECTORY_LOOCV.exists():
+            return pd.read_parquet(FILE_TRAJECTORY_LOOCV)
+    except Exception as exc:
+        st.warning(f"Failed to load LOOCV trajectory data: {exc}")
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False)
+def load_trajectory_production() -> pd.DataFrame:
+    try:
+        if FILE_TRAJECTORY_PRODUCTION.exists():
+            return pd.read_parquet(FILE_TRAJECTORY_PRODUCTION)
+    except Exception as exc:
+        st.warning(f"Failed to load production trajectory data: {exc}")
+    return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def load_full_pce_history() -> pd.DataFrame:
@@ -2089,6 +2113,92 @@ def _render_rul_simulation_expander(
             )
             st.plotly_chart(fig_inc, width='stretch', config=PLOTLY_CONFIG)
 
+def _render_trajectory_expander() -> None:
+    """
+    Render the trajectory forecast comparison: blind LOOCV model (sensor weather)
+    vs. production Digital Twin (API-calibrated weather).
+    """
+    df_loocv = load_trajectory_loocv()
+    df_prod = load_trajectory_production()
+
+    with st.expander("Trajectory Forecast — Blind Model vs. Production Digital Twin", expanded=False):
+        st.markdown(
+            """
+            **Chart 1 · Blind model (LOOCV)** — the model was trained *without* the cell
+            (Leave-One-Cell-Out) but used **real sensor weather** for the forecast window.
+
+            **Chart 2 · Production Digital Twin** — the model *knows* the cell (trained on
+            100% of the healthy cohort) but must rely on **API-forecast weather** (imperfect).
+            """
+        )
+
+        if df_loocv.empty or df_prod.empty:
+            st.warning(
+                "Trajectory artifacts missing. Run "
+                "`python -m src.09_jv_mppt_trajectory_forecasting` first."
+            )
+            return
+
+        c1, c2 = st.columns(2)
+        with c1:
+            param = st.selectbox(
+                "Physical parameter",
+                ["PCE", "pFF", "Jsc", "Voc"],
+                key="traj_param",
+            )
+        with c2:
+            cells = sorted(set(df_loocv["cell_name"]) | set(df_prod["cell_name"]))
+            cell = st.selectbox("Cell", cells, key="traj_cell")
+
+        col1, col2 = st.columns(2)
+
+        panels = [
+            (col1, df_loocv, "Chart 1 · Blind model (LOOCV) · Sensor weather"),
+            (col2, df_prod, "Chart 2 · Production Digital Twin · API weather"),
+        ]
+
+        for col, df, title in panels:
+            with col:
+                st.subheader(title)
+                sub = df[df["cell_name"] == cell].sort_values("Exposure_Days")
+
+                if sub.empty:
+                    st.info("No data for this cell in this scenario.")
+                    continue
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=sub["Exposure_Days"],
+                    y=sub[f"Actual_{param}"],
+                    mode="lines+markers",
+                    name="Actual",
+                    line=dict(color="#2E86AB", width=2),
+                    marker=dict(size=6),
+                ))
+                fig.add_trace(go.Scatter(
+                    x=sub["Exposure_Days"],
+                    y=sub[f"Pred_{param}"],
+                    mode="lines+markers",
+                    name="Predicted",
+                    line=dict(color="#E63946", width=2, dash="dash"),
+                    marker=dict(size=6),
+                ))
+                fig.add_vrect(
+                    x0=0, x1=ANCHOR_DAY,
+                    fillcolor="lightgray",
+                    opacity=0.25,
+                    line_width=0,
+                    annotation_text=f"Calibration ({int(ANCHOR_DAY)} d)",
+                    annotation_position="top left",
+                )
+                fig.update_layout(
+                    xaxis_title="Exposure days",
+                    yaxis_title=param,
+                    height=380,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    legend=dict(orientation="h", y=1.12, x=0),
+                )
+                st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 def general_overview() -> None:
     """Render the "General Overview" page: fleet KPIs, telemetry, and Digital Twin diagnostics."""
@@ -2280,6 +2390,9 @@ def general_overview() -> None:
 
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
     _render_rul_simulation_expander(df_daily, df_sim_sensor, df_sim_api, target_cell="ASLRXAB341")
+
+    st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+    _render_trajectory_expander()    
 
     st.markdown("<hr style='margin: 3rem 0; opacity: 0.5;'>", unsafe_allow_html=True)
 

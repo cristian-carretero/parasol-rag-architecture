@@ -1,14 +1,13 @@
 """
-Module: src/rul_xgb_audit.py
-Description: Empirical audit of the isolated XGBoost component on the daily
-             damage-increment targets (PCE and pFF). Quantifies the real
-             contribution of Machine Learning against trivial baselines and
-             characterises residual structure, overfitting gap, and per-cell
-             systematic bias. Companion diagnostic to 08_mppt_rul_forecasting.py.
+Module: src/trajectory_xgb_audit.py
+Description: Empirical audit of the multivariate trajectory forecasting engines
+             (PCE, pFF, Jsc, Voc). Mirrors the diagnostic structure of
+             rul_xgb_audit.py but operates on the normalized-increment targets
+             used by 09_jv_mppt_trajectory_forecasting.py.
 
              The full audit report is automatically written to
-             `outputs/diagnostics/xgb_audit_summary.txt` while still being
-             streamed to stdout.
+             `outputs/diagnostics/trajectory_audit_summary.txt` while still
+             being streamed to stdout.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ from src.config import (
     RANDOM_STATE,
     XGB_PARAMS_RUL_PCE,
     FILE_HEALTHY_COHORT,
-    FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
     DIAGNOSTICS_DIR,
 )
@@ -64,20 +62,15 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("XGB-Audit")
+logger = logging.getLogger("Trajectory-Audit")
 
 
 # ------------------------------------------------------------------------------
-# Dynamic import of the RUL module (its filename starts with a digit, which is
-# not importable via regular `from src.08_... import X` syntax).
+# Dynamic import of the trajectory module (its filename starts with a digit).
 # ------------------------------------------------------------------------------
-_rul_mod = importlib.import_module("src.08_mppt_rul_forecasting")
-FEATURES_RUL_PCE: list[str] = _rul_mod.FEATURES_RUL_PCE
-build_rul_matrix = _rul_mod.build_rul_matrix
-
-# The pFF target shares the same environmental covariate set as PCE; the module
-# does not export a separate symbol, so we alias it here.
-FEATURES_RUL_PFF: list[str] = list(FEATURES_RUL_PCE)
+_traj_mod = importlib.import_module("src.09_jv_mppt_trajectory_forecasting")
+build_trajectory_matrix = _traj_mod.build_trajectory_matrix
+BASE_FEATURES = _traj_mod.BASE_FEATURES
 
 
 # ------------------------------------------------------------------------------
@@ -88,11 +81,7 @@ N_PERMUTATION_REPEATS = 20
 OVERFIT_GAP_RATIO = 0.30
 VERDICT_THRESHOLDS = {"weak": 3.0, "real": 10.0}
 
-# Default smoothing window applied to the pFF loss signal before differentiation.
-PFF_SMOOTHING_WINDOW = 7
-
-# Auto-export path for the human-readable audit report.
-AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "xgb_audit_summary.txt"
+AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "trajectory_audit_summary.txt"
 
 SCORING = {
     "MAE": make_scorer(mean_absolute_error, greater_is_better=False),
@@ -100,21 +89,16 @@ SCORING = {
     "MedAE": make_scorer(median_absolute_error, greater_is_better=False),
     "R2": make_scorer(r2_score),
 }
-# Sign flips applied to `cross_validate` outputs so all metrics are reported
-# with their natural orientation (higher is better).
 METRIC_SIGNS = {"MAE": -1, "RMSE": -1, "MedAE": -1, "R2": 1}
+
+TARGET_PARAMS = ["PCE", "pFF", "Jsc", "Voc"]
 
 
 # ------------------------------------------------------------------------------
 # Stdout tee utility
 # ------------------------------------------------------------------------------
 class _Tee:
-    """
-    File-like object that duplicates every write/flush to multiple streams.
-
-    Used to mirror the audit's stdout to a persistent text report without
-    touching a single print() statement in the diagnostic code.
-    """
+    """Duplicate every write/flush to multiple streams."""
 
     def __init__(self, *streams: TextIO) -> None:
         self._streams = streams
@@ -137,97 +121,33 @@ class TargetSpec:
     key: str
     target_column: str
     features: list[str]
-    xgb_params: Mapping[str, float | int]
+    xgb_params: Mapping
 
 
-TARGETS = [
-    TargetSpec("pff", "Daily_Increment_pFF", list(FEATURES_RUL_PFF), XGB_PARAMS_RUL_PCE),
-    TargetSpec("pce", "Daily_Damage_Increment", list(FEATURES_RUL_PCE), XGB_PARAMS_RUL_PCE),
-]
+def _build_specs() -> list[TargetSpec]:
+    """One spec per physical parameter, each with its own lag feature."""
+    specs = []
+    for param in TARGET_PARAMS:
+        specs.append(TargetSpec(
+            key=param.lower(),
+            target_column=f"{param}_Delta",
+            features=BASE_FEATURES + [f"{param}_Lag1"],
+            xgb_params=XGB_PARAMS_RUL_PCE,
+        ))
+    return specs
 
 
 # ------------------------------------------------------------------------------
 # Data loading
 # ------------------------------------------------------------------------------
-def load_daily_matrix() -> pd.DataFrame:
-    """
-    Load the action-window scored dataset, inject PCE_initial from the T80
-    ground truth when missing, and build the daily RUL feature matrix. If the
-    pFF target is not already present, derive it locally using a smoothed
-    cumulative-loss formulation.
-    """
-    df_twin = pd.read_parquet(FILE_HEALTHY_COHORT)
-    t80_metrics = pd.read_parquet(FILE_T80_TRUTH)
-    healthy_cohort = joblib.load(FILE_SCREENING_ARTIFACTS)["healthy_cohort"]
-
-    # Inject PCE_initial (same pattern as the RUL forecasting module).
-    if "PCE_initial" not in df_twin.columns:
-        df_twin = df_twin.merge(
-            t80_metrics[["PCE_initial"]],
-            left_on="cell_name",
-            right_index=True,
-            how="left",
-        )
-
-    df_daily = build_rul_matrix(df_twin, healthy_cohort)
-
-    if "pFF" in df_twin.columns and "Daily_Increment_pFF" not in df_daily.columns:
-        df_daily = _augment_with_pff_target(df_daily, df_twin, healthy_cohort)
-
+def load_trajectory_matrix() -> pd.DataFrame:
+    """Load the healthy cohort and build the normalized-increment matrix."""
+    df_healthy = pd.read_parquet(FILE_HEALTHY_COHORT)
+    artifacts = joblib.load(FILE_SCREENING_ARTIFACTS)
+    healthy_cohort = artifacts["healthy_cohort"]
+    df_daily, _ = build_trajectory_matrix(df_healthy)
+    df_daily = df_daily[df_daily["cell_name"].isin(healthy_cohort)].copy()
     return df_daily
-
-
-def _augment_with_pff_target(
-    df_daily: pd.DataFrame,
-    df_twin: pd.DataFrame,
-    healthy_cohort: list[str],
-) -> pd.DataFrame:
-    """
-    Derive the daily pFF increment from the raw pFF column and merge it into
-    the existing daily matrix. The target is defined as the first difference
-    of a smoothed, clipped cumulative loss signal.
-    """
-    df_pff = df_twin[df_twin["cell_name"].isin(healthy_cohort)].copy()
-    if "Datetime" not in df_pff.columns:
-        df_pff["Datetime"] = pd.to_datetime(df_pff["Timestamp"], utc=True)
-    df_pff["Date_Day"] = df_pff["Datetime"].dt.date
-
-    df_pff_daily = (
-        df_pff.groupby(["cell_name", "Date_Day"])
-        .agg(Daily_pFF=("pFF", "mean"))
-        .reset_index()
-        .sort_values(["cell_name", "Date_Day"])
-    )
-
-    # Initial pFF reference: median of the first week of exposure per cell.
-    df_pff_daily["pFF_Initial"] = df_pff_daily.groupby("cell_name")["Daily_pFF"].transform(
-        lambda s: s.head(7).median()
-    )
-
-    # Instantaneous loss and its smoothed version.
-    df_pff_daily["Instant_Loss_pFF"] = 1.0 - df_pff_daily["Daily_pFF"] / df_pff_daily["pFF_Initial"]
-    df_pff_daily["Smoothed_Loss_pFF"] = (
-        df_pff_daily.groupby("cell_name")["Instant_Loss_pFF"]
-        .rolling(PFF_SMOOTHING_WINDOW, min_periods=1)
-        .mean()
-        .reset_index(level=0, drop=True)
-    )
-
-    df_pff_daily["Cumulative_Damage_pFF"] = df_pff_daily["Smoothed_Loss_pFF"].clip(lower=0.0, upper=1.0)
-    df_pff_daily["Lag_Damage_pFF"] = (
-        df_pff_daily.groupby("cell_name")["Cumulative_Damage_pFF"].shift(1).fillna(0.0)
-    )
-
-    df_pff_daily["Daily_Increment_pFF"] = (
-        df_pff_daily["Cumulative_Damage_pFF"] - df_pff_daily["Lag_Damage_pFF"]
-    ).clip(lower=0.0)
-
-    return pd.merge(
-        df_daily,
-        df_pff_daily[["cell_name", "Date_Day", "Daily_Increment_pFF"]],
-        on=["cell_name", "Date_Day"],
-        how="left",
-    )
 
 
 # ------------------------------------------------------------------------------
@@ -249,14 +169,9 @@ def describe_target(y: pd.Series) -> pd.Series:
 
 
 # ------------------------------------------------------------------------------
-# Model zoo and cross-validation
+# Model zoo
 # ------------------------------------------------------------------------------
 def build_model_zoo(xgb_params: Mapping) -> dict[str, BaseEstimator]:
-    """
-    Construct the comparison zoo: trivial baselines, linear models, tree
-    ensembles, and two XGBoost variants (production params and an
-    alternatively-regularised counterpart).
-    """
     xgb_alt_reg = dict(xgb_params)
     xgb_alt_reg["reg_lambda"] = 100.0
     xgb_alt_reg["reg_alpha"] = 1.0
@@ -269,13 +184,10 @@ def build_model_zoo(xgb_params: Mapping) -> dict[str, BaseEstimator]:
         "Ridge(alpha=10.0)": make_pipeline(StandardScaler(), Ridge(alpha=10.0, random_state=RANDOM_STATE)),
         "Ridge(alpha=100.0)": make_pipeline(StandardScaler(), Ridge(alpha=100.0, random_state=RANDOM_STATE)),
         "RandomForest(200,md4)": RandomForestRegressor(
-            n_estimators=200,
-            max_depth=4,
-            min_samples_leaf=5,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
+            n_estimators=200, max_depth=4, min_samples_leaf=5,
+            random_state=RANDOM_STATE, n_jobs=-1,
         ),
-        "XGBoost(producción)": xgb.XGBRegressor(**xgb_params),
+        "XGBoost(production)": xgb.XGBRegressor(**xgb_params),
         "XGBoost(reg_lambda=100)": xgb.XGBRegressor(**xgb_alt_reg),
     }
 
@@ -284,10 +196,9 @@ def evaluate_cv(
     models: Mapping[str, BaseEstimator],
     X: pd.DataFrame,
     y: pd.Series,
-    cv: BaseCrossValidator | list,
+    cv,
     cv_label: str,
 ) -> pd.DataFrame:
-    """Run `cross_validate` for every model in the zoo under a given CV scheme."""
     rows = []
     for name, estimator in models.items():
         result = cross_validate(clone(estimator), X, y, cv=cv, scoring=SCORING, n_jobs=-1)
@@ -319,25 +230,14 @@ def compute_feature_importances(
     X: pd.DataFrame,
     y: pd.Series,
 ) -> pd.DataFrame:
-    """
-    Report three complementary importance signals:
-      - Pearson correlation with the target,
-      - XGBoost internal gain,
-      - Permutation importance (20 repetitions, scoring = -MAE).
-    """
     corr = X.corrwith(y)
     fitted = clone(model).fit(X, y)
     gain = pd.Series(fitted.feature_importances_, index=X.columns)
 
-    # With a single scorer, `permutation_importance` returns a Bunch (the
-    # dict[str, Bunch] variant only applies when scoring is a list or dict);
-    # the cast silences the Union type declared in the stub.
     perm = cast(
         Bunch,
         permutation_importance(
-            fitted,
-            X,
-            y,
+            fitted, X, y,
             n_repeats=N_PERMUTATION_REPEATS,
             random_state=RANDOM_STATE,
             scoring="neg_mean_absolute_error",
@@ -346,12 +246,11 @@ def compute_feature_importances(
     )
     perm_series = pd.Series(perm.importances_mean, index=X.columns)
 
-    df_importance = pd.DataFrame({
+    return pd.DataFrame({
         "pearson_corr": corr,
         "xgb_gain": gain,
         "permutation_importance": perm_series,
-    })
-    return df_importance.sort_values("permutation_importance", ascending=False)
+    }).sort_values("permutation_importance", ascending=False)
 
 
 # ------------------------------------------------------------------------------
@@ -366,7 +265,7 @@ def compute_overfit_gap(
     fitted = clone(model).fit(X, y)
     train_mae = mean_absolute_error(y, fitted.predict(X))
     gap = cv_mae - train_mae
-    verdict = "posible sobreajuste" if gap > OVERFIT_GAP_RATIO * cv_mae else "gap razonable"
+    verdict = "possible overfit" if gap > OVERFIT_GAP_RATIO * cv_mae else "reasonable gap"
     return train_mae, gap, verdict
 
 
@@ -377,11 +276,9 @@ def compute_residual_diagnostics(
     model: BaseEstimator,
     X: pd.DataFrame,
     y: pd.Series,
-    cv: BaseCrossValidator,
+    cv,
     groups: pd.Series | None,
-) -> tuple[np.ndarray, pd.Series, pd.Series | None]:
-    """Compute out-of-fold predictions, residuals, and their correlation with
-    each covariate (and per-cell mean bias, if groups are provided)."""
+):
     oof_pred = cross_val_predict(clone(model), X, y, cv=cv, n_jobs=-1)
     residuals = y.to_numpy() - oof_pred
     resid_corr = pd.Series(
@@ -394,39 +291,51 @@ def compute_residual_diagnostics(
 
 
 # ------------------------------------------------------------------------------
-# Automatic verdict
+# Verdict
 # ------------------------------------------------------------------------------
 def print_verdict(best_model: str, best_mae: float, baseline_mae: float) -> None:
     improvement_pct = 100 * (baseline_mae - best_mae) / baseline_mae
     if improvement_pct < VERDICT_THRESHOLDS["weak"]:
-        verdict = "SIN SEÑAL RELEVANTE"
+        verdict = "NO RELEVANT SIGNAL"
     elif improvement_pct < VERDICT_THRESHOLDS["real"]:
-        verdict = "SEÑAL DÉBIL"
+        verdict = "WEAK SIGNAL"
     else:
-        verdict = "SEÑAL PREDICTIVA REAL"
-    print(f"  Mejor modelo (KFold) : {best_model} (MAE={best_mae:.5f})")
-    print(f"  Mejora vs baseline   : {improvement_pct:+.1f}%")
+        verdict = "REAL PREDICTIVE SIGNAL"
+    print(f"  Best model (KFold)  : {best_model} (MAE={best_mae:.5f})")
+    print(f"  Improvement vs base : {improvement_pct:+.1f}%")
     print(f"  => {verdict}")
 
 
 # ------------------------------------------------------------------------------
-# Per-target diagnostic driver
+# Per-parameter diagnostic
 # ------------------------------------------------------------------------------
 def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
     print("=" * 90)
     print(f" TARGET: {spec.target_column} ({spec.key.upper()})")
     print("=" * 90)
 
+    if spec.target_column not in df_daily.columns:
+        print(f"  [SKIP] Column '{spec.target_column}' not present in the matrix.")
+        print()
+        return
+
+    # Check that all required features exist
+    missing = [f for f in spec.features if f not in df_daily.columns]
+    if missing:
+        print(f"  [SKIP] Missing features: {missing}")
+        print()
+        return
+
     X = df_daily[spec.features]
     y = df_daily[spec.target_column]
     groups = df_daily["cell_name"] if "cell_name" in df_daily.columns else None
 
-    # 1. Descriptive statistics
-    print("\n--- 1. Estadística descriptiva del target ---")
+    # 1. Descriptive stats
+    print("\n--- 1. Target descriptive statistics ---")
     print(describe_target(y).to_string())
 
-    # 2. Model comparison: KFold and GroupKFold
-    print("\n--- 2. Baseline vs modelos: KFold(shuffle) vs GroupKFold(cell_name) ---")
+    # 2. Model comparison
+    print("\n--- 2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     models = build_model_zoo(dict(spec.xgb_params))
 
@@ -435,10 +344,10 @@ def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
     print_cv_table(scores_kfold, baseline_mae)
 
     if groups is None:
-        print("  (GroupKFold omitido: columna 'cell_name' ausente)")
+        print("  (GroupKFold omitted: 'cell_name' column missing)")
     elif groups.nunique() < N_SPLITS:
-        print(f"  (GroupKFold omitido: solo {groups.nunique()} celdas únicas, "
-            f"se necesitan al menos {N_SPLITS} para {N_SPLITS}-fold)")
+        print(f"  (GroupKFold omitted: only {groups.nunique()} unique cells, "
+              f"need at least {N_SPLITS} for {N_SPLITS}-fold)")
     else:
         gkf = GroupKFold(n_splits=min(N_SPLITS, groups.nunique()))
         scores_groupkfold = evaluate_cv(models, X, y, list(gkf.split(X, y, groups)), "GroupKFold")
@@ -446,31 +355,31 @@ def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
         print_cv_table(scores_groupkfold, baseline_mae)
 
     # 3. Feature importance
-    print("\n--- 3. Importancia de variables (Pearson / ganancia XGBoost / permutación) ---")
+    print("\n--- 3. Feature importance (Pearson / XGBoost gain / permutation) ---")
     prod_model = xgb.XGBRegressor(**spec.xgb_params)
     print(compute_feature_importances(prod_model, X, y).to_string())
 
-    # 4. Overfitting gap
-    print("\n--- 4. Overfitting gap (XGBoost producción) ---")
-    cv_mae_prod = scores_kfold.loc[scores_kfold["model"] == "XGBoost(producción)", "MAE_mean"].iloc[0]
+    # 4. Overfit gap
+    print("\n--- 4. Overfitting gap (XGBoost production) ---")
+    cv_mae_prod = scores_kfold.loc[scores_kfold["model"] == "XGBoost(production)", "MAE_mean"].iloc[0]
     train_mae, gap, overfit_verdict = compute_overfit_gap(prod_model, X, y, cv_mae_prod)
-    print(f"  MAE train completo : {train_mae:.5f}")
+    print(f"  MAE full train     : {train_mae:.5f}")
     print(f"  MAE CV (KFold)     : {cv_mae_prod:.5f}")
     print(f"  Gap (CV - train)   : {gap:+.5f} ({overfit_verdict})")
 
-    # 5. Out-of-fold residual diagnostics
-    print("\n--- 5. Residuos fuera de muestra (cross_val_predict) ---")
+    # 5. Residual diagnostics
+    print("\n--- 5. Out-of-sample residuals (cross_val_predict) ---")
     residuals, resid_corr, resid_by_cell = compute_residual_diagnostics(prod_model, X, y, kf, groups)
-    print(f"  Sesgo global (media residuo) : {residuals.mean():+.6f}")
-    print(f"  Std residuo                  : {residuals.std():.6f}")
-    print("\n  Correlación residuo-feature:")
+    print(f"  Global bias (residual mean) : {residuals.mean():+.6f}")
+    print(f"  Residual std                : {residuals.std():.6f}")
+    print("\n  Residual-feature correlation:")
     print(resid_corr.to_string())
     if resid_by_cell is not None:
-        print("\n  Sesgo medio del residuo por celda (out-of-fold):")
+        print("\n  Mean residual bias per cell (out-of-fold):")
         print(resid_by_cell.to_string())
 
-    # 6. Automatic verdict
-    print("\n--- 6. Veredicto automático ---")
+    # 6. Verdict
+    print("\n--- 6. Automatic verdict ---")
     best_row = scores_kfold.iloc[0]
     print_verdict(best_row["model"], best_row["MAE_mean"], baseline_mae)
     print()
@@ -480,12 +389,11 @@ def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
 # Entrypoint
 # ------------------------------------------------------------------------------
 def _run_audit() -> None:
-    """Inner routine executed while stdout is teed to the report file."""
-    logger.info("Loading daily feature matrix for XGBoost audit...")
-    df_daily = load_daily_matrix()
+    logger.info("Loading trajectory feature matrix for multivariate audit...")
+    df_daily = load_trajectory_matrix()
     logger.info(f"Rows: {len(df_daily)} | Cells: {df_daily['cell_name'].nunique()}")
 
-    for spec in TARGETS:
+    for spec in _build_specs():
         diagnose_target(df_daily, spec)
 
 

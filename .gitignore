@@ -22,4 +22,4 @@ outputs/figures/
 .idea/
 
 # Streamlit agent skills (environment-specific symlinks)
-.agents/skills/
+.agents/skills/outputs/diagnostics/

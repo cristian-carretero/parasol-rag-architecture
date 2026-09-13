@@ -18,6 +18,26 @@ BASE_DATA_DIR = Path("data")
 RAW_DIR = BASE_DATA_DIR / "raw/outdoor"
 # Raw input: per-device CSVs (<device_id>/{mpp,jv,meteo}.csv). Immutable source of truth.
 
+# ---------------------------------------------------------------------------
+# Outputs root (declared early so downstream file paths can reference it).
+# These artifacts are regenerable and gitignored, distinct from `data/`
+# pipeline artifacts. Kept under a single root to make cleanup trivial.
+# ---------------------------------------------------------------------------
+BASE_OUTPUTS_DIR = Path("outputs")
+FIGURES_DIR = BASE_OUTPUTS_DIR / "figures"
+DIAGNOSTICS_DIR = BASE_OUTPUTS_DIR / "diagnostics"
+
+# Per-module figure directories, named after the pipeline stage they illustrate.
+FIGURES_FILTERING_DIR = FIGURES_DIR / "filtering"
+FIGURES_CLUSTERING_DIR = FIGURES_DIR / "clustering"
+FIGURES_SCREENING_DIR = FIGURES_DIR / "screening"
+FIGURES_XAI_DIR = FIGURES_DIR / "xai"
+FIGURES_RUL_DIR = FIGURES_DIR / "rul"
+
+# ==========================================
+# PIPELINE ARTIFACT PATHS (per module)
+# ==========================================
+
 # [01_ingest_raw.py] ── Ingestion & Parquet serialization
 DIR_PROCESSED = BASE_DATA_DIR / "processed/outdoor"
 # Per-device Parquet artifacts: <DIR_PROCESSED>/<device_id>/<device_id>_{mpp,jv,meteo}.parquet
@@ -27,7 +47,8 @@ DIR_PROCESSED = BASE_DATA_DIR / "processed/outdoor"
 # [02_jv_filtering.py] ── Physical QC, artifact removal, & physics extraction
 DIR_FILTERED = BASE_DATA_DIR / "filtered/outdoor"
 FILE_JV_FILTERED = DIR_FILTERED / "02_jv_filtered.parquet"
-# Point-level J-V sweeps with QC boolean masks and extracted physical scalars (Voc, Jsc, FF, P_mpp).
+# Point-level J-V sweeps with QC boolean masks and extracted physical scalars
+# (Voc, Jsc, FF, P_mpp).
 FILE_FILTERING_META = BASE_DATA_DIR / "filtered/metadata/outdoor/02_valid_curves_summary.json"
 # Per-cell valid curve counts: {"<cell_name>": <n_valid>, ...}.
 
@@ -41,13 +62,15 @@ FILE_CLUSTERING_ARTIFACTS = BASE_DATA_DIR / "clustered/artifacts/03_clustering_a
 # [04_mppt_aggregation.py] ── 10-min fleet telemetry + PCE
 DIR_AGGREGATED = BASE_DATA_DIR / "aggregated/outdoor"
 FILE_TELEMETRY_10MIN = DIR_AGGREGATED / "04_meteo_mppt_10min.parquet"
-# Fleet-wide 10-min resampled telemetry. Columns: POA_Irradiance_W_m2, AbsoluteHumidity_g_m3,
-# ModuleTemp_{Mean,Median,Min,Max}_C, and per-device {PCE, Power_W, ModuleTemp}_<device_id>.
+# Fleet-wide 10-min resampled telemetry. Columns: POA_Irradiance_W_m2,
+# AbsoluteHumidity_g_m3, ModuleTemp_{Mean,Median,Min,Max}_C, and per-device
+# {PCE, Power_W, ModuleTemp}_<device_id>.
 
-# [05_merge_jv_mppt.py] ── Feature matrix (X): J-V curves + aligned telemetry + physical features
+# [05_merge_jv_mppt.py] ── Feature matrix (X): J-V curves + aligned telemetry
 DIR_DATASET = BASE_DATA_DIR / "dataset/outdoor"
 FILE_MERGED_FEATURES = DIR_DATASET / "05_jv_mppt_merged.parquet"
-# One row per J-V curve with aligned telemetry, physical parameters (Voc, Jsc, FF), and cumulative stressors.
+# One row per J-V curve with aligned telemetry, physical parameters
+# (Voc, Jsc, FF), and cumulative stressors.
 
 # [06_jv_mppt_t80_tracker.py] ── Ground truth (y): T80 collapse day per cell
 FILE_T80_TRUTH = DIR_DATASET / "06_t80_ground_truth.parquet"
@@ -62,8 +85,8 @@ FILE_T80_TRUTH = DIR_DATASET / "06_t80_ground_truth.parquet"
 DIR_SCREENING = BASE_DATA_DIR / "screening/outdoor"
 DIR_SCREENING_ARTIFACTS = BASE_DATA_DIR / "screening/artifacts"
 
-# Action-window telemetry with Digital Twin predictions and ML alert flags.
 FILE_HEALTHY_COHORT = DIR_SCREENING / "07_early_screened_cohort.parquet"
+# Action-window telemetry with Digital Twin predictions and ML alert flags.
 # Columns: cell_name, Timestamp, Exposure_Days, PCE, pFF, environmental
 # features, Twin_{PCE,pFF}_Pred, Underperformance_*, Alert_*, Digital_Twin_Alert.
 
@@ -79,11 +102,24 @@ FILE_BURN_IN_GRID = DIR_SCREENING_ARTIFACTS / "07_burn_in_grid_search.parquet"
 # [08_mppt_rul_forecasting.py] ── RUL prognosis & API calibration
 DIR_RUL = BASE_DATA_DIR / "rul"
 FILE_RUL_TARGETS = DIR_RUL / "08_mppt_rul_targets.parquet"
-# Consolidated RUL target per cell: {cell_name, last_anchor_day, rul_pred_days, true_survival_days}.
+# Consolidated RUL target per cell: {cell_name, last_anchor_day,
+# rul_pred_days, true_survival_days}.
+
+FILE_RUL_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "rul_coeffs_calibrated.json"
+# Optimized kinematic coefficients (written by rul_calibration_optimizer.py).
+# When present, the 08 module loads these instead of the hardcoded baselines.
 
 # [09_jv_mppt_trajectory_forecasting.py] ── Multivariate kinematic trajectory engines
 FILE_TRAJECTORY_MODELS = DIR_RUL / "09_trajectory_models.joblib"
 # Serialized dictionary of XGBoost models for physical parameters (PCE, pFF, Voc, Jsc).
+
+FILE_TRAJECTORY_LOOCV = DIR_RUL / "09_trajectory_loocv.parquet"
+# Blind-model trajectories (LOOCV): model trained without the cell, sensor weather.
+# Columns: cell_name, Date_Day, Exposure_Days, Actual_*, Pred_*.
+
+FILE_TRAJECTORY_PRODUCTION = DIR_RUL / "09_trajectory_production.parquet"
+# Production trajectories: model trained on 100% of cohort, API-calibrated weather.
+# Columns: cell_name, Date_Day, Exposure_Days, Actual_*, Pred_*.
 
 # ==============================================================================
 # 0. PHYSICAL / OPTICAL CONSTANTS (used across every stage)
@@ -111,7 +147,7 @@ RANDOM_STATE = 42
 TELEMETRY_MERGE_TOLERANCE = pd.Timedelta("20min")
 
 # ==============================================================================
-# 2. FILTERING / QUALITY CONTROL (filtering.py, viz_filtering.py)
+# 2. FILTERING / QUALITY CONTROL
 # ==============================================================================
 # Inclusive daylight operational window used to exclude night-time noise from
 # both the QC pipeline and its diagnostic plots.
@@ -182,7 +218,8 @@ MIN_PHYSICAL_MAE_PFF = 0.035
 ALERT_FREQUENCY_THRESHOLD_PCT = 50.0
 
 # Quantile of in-sample residuals used to set the per-metric alert threshold
-# (e.g. 0.98 -> "98th percentile"). Used both for training and for the empirical audit chart.
+# (e.g. 0.98 -> "98th percentile"). Used both for training and for the empirical
+# audit chart.
 RESIDUAL_ALERT_QUANTILE = 0.98
 
 # XGBoost hyperparameters for the Dual Digital Twin (shared by the production
@@ -202,7 +239,8 @@ XGB_PFF_PARAMS = dict(
 # Shared DecisionTreeClassifier hyperparameters for both the physical-forensic
 # and ML-alert surrogate explainers.
 SURROGATE_TREE_PARAMS = dict(
-    max_depth=3, min_samples_leaf=5, class_weight="balanced", random_state=RANDOM_STATE,
+    max_depth=3, min_samples_leaf=5, class_weight="balanced",
+    random_state=RANDOM_STATE,
 )
 
 # Minimum feature importance to report in a surrogate's explanation.
@@ -232,36 +270,22 @@ PCA_TARGET_EXPLAINED_VARIANCE = 0.90
 DEFAULT_LAT = 41.6833
 DEFAULT_LON = -0.8833
 
-# Hyperparameters separated by metric to prevent regularization collapse
+# Hyperparameters for the RUL damage-increment engine (PCE; also reused by the
+# pFF audit and the multivariate trajectory engines for consistency).
 XGB_PARAMS_RUL_PCE = dict(
     n_estimators=200, learning_rate=0.03, max_depth=3,
     subsample=0.75, colsample_bytree=0.8, reg_lambda=10.0,
     reg_alpha=0.5, random_state=RANDOM_STATE, n_jobs=-1
 )
-XGB_PARAMS_RUL_PFF = dict(
-    n_estimators=200, learning_rate=0.03, max_depth=3,
-    subsample=0.75, colsample_bytree=0.8, reg_lambda=1.0,
-    reg_alpha=0.0, random_state=RANDOM_STATE, n_jobs=-1
-)
+
+# --- MULTIVARIATE TRAJECTORY FORECASTING ---
+ROLLING_WINDOW = 7         # Days of thermal/radiative inertia memory
+ANCHOR_DAY = 14.0          # Calibration window (burn-in) before forecasting starts
+FORECAST_HORIZON = 14      # Days to simulate into the future after the anchor
+TARGET_PARAMS = ["PCE", "pFF", "Jsc", "Voc"]
 
 # ==============================================================================
-# 9. OUTPUT ARTIFACTS (HUMAN-READABLE: FIGURES, DIAGNOSTICS)
-# ==============================================================================
-# Outputs are regenerable and gitignored, distinct from `data/` pipeline
-# artifacts. Kept under a single root to make cleanup and packaging trivial.
-BASE_OUTPUTS_DIR = Path("outputs")
-FIGURES_DIR = BASE_OUTPUTS_DIR / "figures"
-DIAGNOSTICS_DIR = BASE_OUTPUTS_DIR / "diagnostics"
-
-# Per-module figure directories, named after the pipeline stage they illustrate.
-FIGURES_FILTERING_DIR = FIGURES_DIR / "filtering"
-FIGURES_CLUSTERING_DIR = FIGURES_DIR / "clustering"
-FIGURES_SCREENING_DIR = FIGURES_DIR / "screening"
-FIGURES_XAI_DIR = FIGURES_DIR / "xai"
-FIGURES_RUL_DIR = FIGURES_DIR / "rul"
-
-# ==============================================================================
-# 10. DEPLOYMENT CONTEXT
+# 9. DEPLOYMENT CONTEXT
 # ==============================================================================
 # Deployment-local timezone. Raw timestamps are stored in UTC for DST-safe
 # merging, but every operational-hour window (daylight filtering, chronometric
