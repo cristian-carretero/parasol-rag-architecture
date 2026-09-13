@@ -66,6 +66,10 @@ LAMBDA_W_DEFAULT = rul.LAMBDA_W_HARDCODED
 MU_DEFAULT = rul.MU_HARDCODED
 EPS_DEFAULT = rul.EPS_HARDCODED
 
+# Temporal baseline blend (Strategy B)
+K_BLEND_DEFAULT = 0.0   # 0 = pure engine, 1 = pure clock
+T_REF_DEFAULT = 54.0    # median lifetime of the cohort (days)
+
 ROLLING_WINDOW = rul.ROLLING_WINDOW
 SIMULATION_WINDOW = rul.SIMULATION_WINDOW
 T80_DAMAGE_LIMIT = rul.T80_DAMAGE_LIMIT
@@ -112,6 +116,8 @@ BASELINE_REGISTRY = {
     "lambda_w": LAMBDA_W_DEFAULT,
     "mu": MU_DEFAULT,
     "eps": EPS_DEFAULT,
+    "k_blend": K_BLEND_DEFAULT,
+    "t_ref": T_REF_DEFAULT,
 }
 
 
@@ -238,6 +244,8 @@ def evaluate_coefficients(
     units: List[SimulationUnit],
     phi_0: float, phi_1: float, phi_2: float, lambda_w: float,
     mu: float, eps: float,
+    k_blend: float = K_BLEND_DEFAULT,
+    t_ref: float = T_REF_DEFAULT,
 ) -> Dict[str, float]:
     """
     Fast re-evaluation: applies the soft-countdown sequentially per
@@ -269,6 +277,11 @@ def evaluate_coefficients(
                 rul_val = min(rul_val, prev_rul + eps)
             else:
                 rul_val = rul_raw
+
+            # Strategy B: blend with temporal baseline
+            if k_blend > 0.0:
+                rul_temporal = max(0.0, t_ref - u.anchor_day)
+                rul_val = (1.0 - k_blend) * rul_val + k_blend * rul_temporal
 
             prev_anchor, prev_rul = u.anchor_day, rul_val
             records.append({
@@ -308,7 +321,10 @@ GRID_1D = {
     "lambda_w": [0.5, 0.8, 1.0, 1.5, 2.0, 3.0],
     "mu":       [0.2, 0.3, 0.5, 0.7, 0.9],
     "eps":      [0.0, 0.5, 1.0, 2.0, 5.0],
+    "k_blend":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+    "t_ref":    [45.0, 50.0, 54.0, 58.0, 65.0],
 }
+
 
 # Phase 2: focused N-D grid search on the most impactful coefficients.
 # phi_1 and phi_2 are held at their defaults (see BASELINE_REGISTRY).
@@ -317,6 +333,8 @@ GRID_ND = {
     "lambda_w": [0.5, 0.6, 0.7],
     "mu":       [0.55, 0.60, 0.65, 0.70],
     "eps":      [0.5, 1.0],
+    "k_blend":  [0.0, 0.1, 0.2, 0.3, 0.5],
+    "t_ref":    [50.0, 54.0, 58.0],
 }
 
 
@@ -341,6 +359,7 @@ def run_phase_1_sensitivity(units: List[SimulationUnit]) -> pd.DataFrame:
                 phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
                 phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
                 mu=MU_DEFAULT, eps=EPS_DEFAULT,
+                k_blend=K_BLEND_DEFAULT, t_ref=T_REF_DEFAULT,
             )
             kwargs[coeff_name] = v
             res = evaluate_coefficients(units, **kwargs)
@@ -373,6 +392,7 @@ def run_phase_2_grid(units: List[SimulationUnit]) -> pd.DataFrame:
             phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
             phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
             mu=MU_DEFAULT, eps=EPS_DEFAULT,
+            k_blend=K_BLEND_DEFAULT, t_ref=T_REF_DEFAULT,
         )
         for k, v in zip(keys, combo):
             kwargs[k] = v
@@ -461,6 +481,8 @@ def persist_calibrated_coefficients(
         "lambda_w": float(best_row["lambda_w"]) if "lambda_w" in best_row.index else LAMBDA_W_DEFAULT,
         "mu":       float(best_row["mu"]) if "mu" in best_row.index else MU_DEFAULT,
         "eps":      float(best_row["eps"]) if "eps" in best_row.index else EPS_DEFAULT,
+        "k_blend":  float(best_row["k_blend"]) if "k_blend" in best_row.index else K_BLEND_DEFAULT,
+        "t_ref":    float(best_row["t_ref"]) if "t_ref" in best_row.index else T_REF_DEFAULT,
         "metadata": {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "generated_by": "src/rul_calibration_optimizer.py",

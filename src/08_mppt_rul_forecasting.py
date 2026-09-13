@@ -82,6 +82,10 @@ MU_HARDCODED = 0.5
 # Monotonicity lax:  RUL_final <= RUL_prev + EPS
 EPS_HARDCODED = 1.0
 
+# Temporal baseline blend (Strategy B): mixes engine RUL with clock RUL
+K_BLEND_HARDCODED = 0.0   # 0 = pure engine, 1 = pure clock
+T_REF_HARDCODED = 54.0    # median lifetime of the cohort (days)
+
 
 # ------------------------------------------------------------------------------
 # Calibrated coefficient loader
@@ -103,6 +107,7 @@ def _load_calibrated_coefficients() -> dict:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
         required = {"phi_0", "phi_1", "phi_2", "lambda_w", "mu", "eps"}
+        optional = {"k_blend", "t_ref"}
         missing = required - set(data.keys())
         if missing:
             logger.warning(
@@ -110,7 +115,12 @@ def _load_calibrated_coefficients() -> dict:
                 f"Falling back to hardcoded defaults."
             )
             return {}
-        return {k: float(data[k]) for k in required}
+        # Optional keys (Strategy B): fall back silently if absent
+        result = {k: float(data[k]) for k in required}
+        for k in optional:
+            if k in data:
+                result[k] = float(data[k])
+        return result
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(f"Failed to load calibrated coefficients JSON: {exc}")
         return {}
@@ -123,6 +133,8 @@ PHI_2_DEFAULT = PHI_2_HARDCODED
 LAMBDA_W_DEFAULT = LAMBDA_W_HARDCODED
 MU_DEFAULT = MU_HARDCODED
 EPS_DEFAULT = EPS_HARDCODED
+K_BLEND_DEFAULT = K_BLEND_HARDCODED
+T_REF_DEFAULT = T_REF_HARDCODED
 
 _CALIBRATED = _load_calibrated_coefficients()
 if _CALIBRATED:
@@ -132,10 +144,13 @@ if _CALIBRATED:
     LAMBDA_W_DEFAULT = _CALIBRATED["lambda_w"]
     MU_DEFAULT = _CALIBRATED["mu"]
     EPS_DEFAULT = _CALIBRATED["eps"]
+    K_BLEND_DEFAULT = _CALIBRATED.get("k_blend", K_BLEND_HARDCODED)
+    T_REF_DEFAULT = _CALIBRATED.get("t_ref", T_REF_HARDCODED)
     logger.info(
         f"Using CALIBRATED kinematic coefficients: "
         f"phi_0={PHI_0_DEFAULT}, phi_1={PHI_1_DEFAULT}, phi_2={PHI_2_DEFAULT}, "
-        f"lambda_w={LAMBDA_W_DEFAULT}, mu={MU_DEFAULT}, eps={EPS_DEFAULT}"
+        f"lambda_w={LAMBDA_W_DEFAULT}, mu={MU_DEFAULT}, eps={EPS_DEFAULT}, "
+        f"k_blend={K_BLEND_DEFAULT}, t_ref={T_REF_DEFAULT}"
     )
 else:
     logger.info("Using HARDCODED kinematic coefficients (no calibrated JSON found).")
@@ -412,6 +427,8 @@ def run_dynamic_backtesting(
     train_cells: Optional[List[str]] = None,
     mu: float = MU_DEFAULT,
     eps: float = EPS_DEFAULT,
+    k_blend: float = K_BLEND_DEFAULT,
+    t_ref: float = T_REF_DEFAULT,
     kinematic_coeffs: Optional[dict] = None,
 ) -> List[dict]:
     """
@@ -499,6 +516,11 @@ def run_dynamic_backtesting(
                 # Allow a slight rebound under optimal weather but keep a descending ramp
                 rul_val = min(rul_val, prev_rul_sensor + eps)
 
+            # Strategy B: blend with temporal baseline
+            if k_blend > 0.0:
+                rul_temporal = max(0.0, t_ref - actual_day)
+                rul_val = (1.0 - k_blend) * rul_val + k_blend * rul_temporal
+
             prev_anchor_sensor, prev_rul_sensor = actual_day, rul_val
             rul_str = f"{rul_val:5.1f} Days"
 
@@ -575,6 +597,11 @@ def run_dynamic_backtesting(
                     expected_rul = max(0.0, prev_rul_api - elapsed)
                     rul_val = mu * rul_val + (1.0 - mu) * expected_rul
                     rul_val = min(rul_val, prev_rul_api + eps)
+
+                # Strategy B: blend with temporal baseline
+                if k_blend > 0.0:
+                    rul_temporal = max(0.0, t_ref - actual_day)
+                    rul_val = (1.0 - k_blend) * rul_val + k_blend * rul_temporal
 
                 prev_anchor_api, prev_rul_api = actual_day, rul_val
                 rul_str = f"{rul_val:5.1f} Days"
@@ -700,6 +727,10 @@ def run_live_production_forecast(
                     df_forecast,
                     model_pce,
                 )
+                # Strategy B: blend with temporal baseline
+                if K_BLEND_DEFAULT > 0.0:
+                    rul_temporal = max(0.0, T_REF_DEFAULT - actual_day)
+                    rul_val = (1.0 - K_BLEND_DEFAULT) * rul_val + K_BLEND_DEFAULT * rul_temporal
                 rul_str = f"{rul_val:5.1f} Days"
 
             print(

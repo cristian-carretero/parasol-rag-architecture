@@ -111,7 +111,9 @@ FILE_RUL_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "rul_coeffs_calibrated.json"
 
 # [09_jv_mppt_trajectory_forecasting.py] ── Multivariate kinematic trajectory engines
 FILE_TRAJECTORY_MODELS = DIR_RUL / "09_trajectory_models.joblib"
-# Serialized dictionary of XGBoost models for physical parameters (PCE, pFF, Voc, Jsc).
+# Serialized dict {param -> fitted model}. Model family per parameter is
+# selected via MODEL_TYPE_PER_PARAM in the 09 module (XGBoost for PCE,
+# RandomForest for FF/Jsc/Voc), per the trajectory audit.
 
 FILE_TRAJECTORY_LOOCV = DIR_RUL / "09_trajectory_loocv.parquet"
 # Blind-model trajectories (LOOCV): model trained without the cell, sensor weather.
@@ -120,6 +122,10 @@ FILE_TRAJECTORY_LOOCV = DIR_RUL / "09_trajectory_loocv.parquet"
 FILE_TRAJECTORY_PRODUCTION = DIR_RUL / "09_trajectory_production.parquet"
 # Production trajectories: model trained on 100% of cohort, API-calibrated weather.
 # Columns: cell_name, Date_Day, Exposure_Days, Actual_*, Pred_*.
+
+FILE_TRAJECTORY_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "trajectory_coeffs_calibrated.json"
+# Per-parameter k_blend calibrated by trajectory_calibration_optimizer.py.
+# When present, the 09 module loads these instead of the hardcoded defaults.
 
 # ==============================================================================
 # 0. PHYSICAL / OPTICAL CONSTANTS (used across every stage)
@@ -157,8 +163,9 @@ OPERATIONAL_HOUR_END = 22
 # ==============================================================================
 # 3. T80 PHYSICAL SURVIVAL TRACKING
 # ==============================================================================
-# Fraction of the initial (Day 0-3) peak PCE/pFF that defines the T80 death
-# threshold (80% of peak).
+# Fraction of the initial (Day 0-3) peak PCE that defines the T80 death
+# threshold (80% of peak). pFF is also tracked but is a morphological
+# descriptor, not a physical parameter.
 T80_FRACTION = 0.80
 
 # Number of initial daily observations used to establish the peak baseline.
@@ -271,7 +278,8 @@ DEFAULT_LAT = 41.6833
 DEFAULT_LON = -0.8833
 
 # Hyperparameters for the RUL damage-increment engine (PCE; also reused by the
-# pFF audit and the multivariate trajectory engines for consistency).
+# trajectory audit for its XGBoost comparison baseline). The trajectory
+# forecasting engine itself uses RandomForest instead, per the audit findings.
 XGB_PARAMS_RUL_PCE = dict(
     n_estimators=200, learning_rate=0.03, max_depth=3,
     subsample=0.75, colsample_bytree=0.8, reg_lambda=10.0,
@@ -281,8 +289,21 @@ XGB_PARAMS_RUL_PCE = dict(
 # --- MULTIVARIATE TRAJECTORY FORECASTING ---
 ROLLING_WINDOW = 7         # Days of thermal/radiative inertia memory
 ANCHOR_DAY = 14.0          # Calibration window (burn-in) before forecasting starts
-FORECAST_HORIZON = 14      # Days to simulate into the future after the anchor
-TARGET_PARAMS = ["PCE", "pFF", "Jsc", "Voc"]
+
+# Evaluation horizon: how many days AFTER the anchor are compared against
+# ground truth to compute MAE. Kept at 14 so all cells share a comparable
+# window (this is the number used in the technical report).
+EVALUATION_HORIZON = 14
+
+# Simulation horizon: how many days AFTER the anchor are simulated for the
+# dashboard. Days beyond EVALUATION_HORIZON are pure extrapolation: they are
+# plotted but not scored (no ground truth needed).
+SIMULATION_HORIZON = 30
+
+# Backward-compatible alias. Prefer EVALUATION_HORIZON in new code.
+FORECAST_HORIZON = EVALUATION_HORIZON
+
+TARGET_PARAMS = ["PCE", "FF", "Jsc", "Voc"]
 
 # ==============================================================================
 # 9. DEPLOYMENT CONTEXT

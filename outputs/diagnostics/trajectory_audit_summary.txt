@@ -1,0 +1,326 @@
+==========================================================================================
+ TARGET: PCE_Delta (PCE)
+==========================================================================================
+
+--- Q1. Target descriptive statistics ---
+n_samples       159.000000
+mean              0.000155
+median           -0.002217
+std               0.022372
+min              -0.106432
+max               0.139080
+skew              1.314360
+pct_zero          0.000000
+pct_negative     54.088050
+
+  Signal strength:
+    Pearson with own lag : -0.1489
+    Fraction of zeros    : 0.00%
+    Relative std         : 144.3645
+    Skewness             : +1.3144
+
+--- Q2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---
+  [     KFold] RandomForest(200,md4)        MAE=0.01143±0.00155  RMSE=0.01923  MedAE=0.00685  R2=+0.1109  ΔMAE_vs_baseline=+0.00152
+  [     KFold] Ridge(alpha=100.0)           MAE=0.01246±0.00198  RMSE=0.02010  MedAE=0.00828  R2=+0.0587  ΔMAE_vs_baseline=+0.00049
+  [     KFold] Dummy(median)                MAE=0.01283±0.00234  RMSE=0.02159  MedAE=0.00808  R2=-0.0786  ΔMAE_vs_baseline=+0.00012
+  [     KFold] XGBoost(production)          MAE=0.01295±0.00248  RMSE=0.02160  MedAE=0.00800  R2=-0.0688  ΔMAE_vs_baseline=+0.00000
+  [     KFold] XGBoost(reg_lambda=100)      MAE=0.01295±0.00248  RMSE=0.02160  MedAE=0.00799  R2=-0.0695  ΔMAE_vs_baseline=+0.00000
+  [     KFold] Dummy(mean)                  MAE=0.01295±0.00248  RMSE=0.02160  MedAE=0.00799  R2=-0.0695  ΔMAE_vs_baseline=+0.00000
+  [     KFold] Ridge(alpha=10.0)            MAE=0.01306±0.00154  RMSE=0.01975  MedAE=0.01025  R2=+0.0402  ΔMAE_vs_baseline=-0.00011
+  [     KFold] Ridge(alpha=1.0)             MAE=0.01347±0.00145  RMSE=0.01987  MedAE=0.01067  R2=+0.0140  ΔMAE_vs_baseline=-0.00052
+  [     KFold] Ridge(alpha=0.1)             MAE=0.01353±0.00145  RMSE=0.01989  MedAE=0.01075  R2=+0.0103  ΔMAE_vs_baseline=-0.00058
+
+  [GroupKFold] Dummy(median)                MAE=0.01339±0.00187  RMSE=0.02307  MedAE=0.00768  R2=-0.0446  ΔMAE_vs_baseline=-0.00044
+  [GroupKFold] Dummy(mean)                  MAE=0.01355±0.00203  RMSE=0.02319  MedAE=0.00786  R2=-0.0515  ΔMAE_vs_baseline=-0.00060
+  [GroupKFold] XGBoost(reg_lambda=100)      MAE=0.01355±0.00203  RMSE=0.02319  MedAE=0.00786  R2=-0.0515  ΔMAE_vs_baseline=-0.00060
+  [GroupKFold] XGBoost(production)          MAE=0.01356±0.00204  RMSE=0.02319  MedAE=0.00786  R2=-0.0516  ΔMAE_vs_baseline=-0.00060
+  [GroupKFold] RandomForest(200,md4)        MAE=0.01382±0.00371  RMSE=0.02183  MedAE=0.00860  R2=+0.0713  ΔMAE_vs_baseline=-0.00087
+  [GroupKFold] Ridge(alpha=100.0)           MAE=0.01383±0.00249  RMSE=0.02221  MedAE=0.00889  R2=+0.0404  ΔMAE_vs_baseline=-0.00088
+  [GroupKFold] Ridge(alpha=10.0)            MAE=0.01478±0.00206  RMSE=0.02201  MedAE=0.00933  R2=+0.0559  ΔMAE_vs_baseline=-0.00183
+  [GroupKFold] Ridge(alpha=1.0)             MAE=0.01524±0.00189  RMSE=0.02218  MedAE=0.01004  R2=+0.0398  ΔMAE_vs_baseline=-0.00229
+  [GroupKFold] Ridge(alpha=0.1)             MAE=0.01530±0.00188  RMSE=0.02220  MedAE=0.01016  R2=+0.0373  ΔMAE_vs_baseline=-0.00235
+
+--- Q3a. Per-cell error breakdown (XGBoost production, out-of-fold) ---
+             n       mae      bias
+cell_name                         
+A164AB302c  28  0.015870  0.001046
+M83AB302    23  0.015222 -0.008996
+ASLRXAB341  54  0.011985  0.000231
+A167AB344a  54  0.011402  0.003081
+
+--- Q3b. Per-exposure-phase error breakdown ---
+                n  exposure_range_min  exposure_range_max       mae
+phase                                                              
+Q1 (earliest)  40            1.207447           11.319414  0.019734
+Q2             40           11.387386           21.378306  0.008164
+Q3             39           21.432231           35.421899  0.014740
+Q4 (latest)    40           36.387519           56.285836  0.009165
+
+--- Q4. Feature importance (Pearson / XGBoost gain / permutation) ---
+                       pearson_corr  xgb_gain  permutation_importance
+Daily_Max_Temp_C          -0.286857  0.153941                0.000028
+Rolling_Irradiance        -0.161605  0.132403                0.000012
+PCE_Lag1                  -0.148904  0.357603                0.000009
+Rolling_Thermal_load      -0.195429  0.177843                0.000006
+Daily_Irradiance_Dose      0.126094  0.155560                0.000006
+Daily_Median_Humidity     -0.179084  0.022650                0.000002
+
+--- Overfitting gap (XGBoost production) ---
+  MAE full train     : 0.01276
+  MAE CV (KFold)     : 0.01295
+  Gap (CV - train)   : +0.00019 (reasonable gap)
+
+--- Verdict ---
+  Best model (KFold)   : RandomForest(200,md4) (MAE=0.01143)
+  Improvement vs base  : +11.8%
+  Signal with own lag  : r=-0.1489  (autocorrelated)
+  Degenerate target?   : 0.0% zeros, rel_std=144.364, skew=+1.31
+  => REAL SIGNAL
+
+==========================================================================================
+ TARGET: FF_Delta (FF)
+==========================================================================================
+
+--- Q1. Target descriptive statistics ---
+n_samples       159.000000
+mean             -0.004225
+median           -0.000294
+std               0.029656
+min              -0.252413
+max               0.056204
+skew             -4.128919
+pct_zero          0.000000
+pct_negative     50.314465
+
+  Signal strength:
+    Pearson with own lag : -0.3991
+    Fraction of zeros    : 0.00%
+    Relative std         : 7.0184
+    Skewness             : -4.1289
+
+--- Q2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---
+  [     KFold] Dummy(median)                MAE=0.01670±0.00428  RMSE=0.02724  MedAE=0.01154  R2=-0.0196  ΔMAE_vs_baseline=+0.00043
+  [     KFold] Ridge(alpha=100.0)           MAE=0.01700±0.00306  RMSE=0.02607  MedAE=0.01107  R2=+0.0407  ΔMAE_vs_baseline=+0.00013
+  [     KFold] Dummy(mean)                  MAE=0.01713±0.00375  RMSE=0.02713  MedAE=0.01128  R2=-0.0190  ΔMAE_vs_baseline=+0.00000
+  [     KFold] XGBoost(reg_lambda=100)      MAE=0.01713±0.00375  RMSE=0.02713  MedAE=0.01128  R2=-0.0190  ΔMAE_vs_baseline=-0.00000
+  [     KFold] XGBoost(production)          MAE=0.01721±0.00377  RMSE=0.02709  MedAE=0.01133  R2=-0.0119  ΔMAE_vs_baseline=-0.00009
+  [     KFold] RandomForest(200,md4)        MAE=0.01730±0.00316  RMSE=0.02636  MedAE=0.01125  R2=-0.0273  ΔMAE_vs_baseline=-0.00018
+  [     KFold] Ridge(alpha=10.0)            MAE=0.01754±0.00284  RMSE=0.02638  MedAE=0.01284  R2=-0.0299  ΔMAE_vs_baseline=-0.00042
+  [     KFold] Ridge(alpha=1.0)             MAE=0.01787±0.00304  RMSE=0.02654  MedAE=0.01324  R2=-0.0579  ΔMAE_vs_baseline=-0.00075
+  [     KFold] Ridge(alpha=0.1)             MAE=0.01792±0.00308  RMSE=0.02657  MedAE=0.01330  R2=-0.0621  ΔMAE_vs_baseline=-0.00080
+
+  [GroupKFold] Dummy(median)                MAE=0.01679±0.00186  RMSE=0.02740  MedAE=0.01284  R2=-0.0292  ΔMAE_vs_baseline=+0.00034
+  [GroupKFold] XGBoost(reg_lambda=100)      MAE=0.01703±0.00189  RMSE=0.02717  MedAE=0.01151  R2=-0.0134  ΔMAE_vs_baseline=+0.00010
+  [GroupKFold] Dummy(mean)                  MAE=0.01703±0.00189  RMSE=0.02717  MedAE=0.01151  R2=-0.0134  ΔMAE_vs_baseline=+0.00010
+  [GroupKFold] XGBoost(production)          MAE=0.01709±0.00182  RMSE=0.02722  MedAE=0.01184  R2=-0.0184  ΔMAE_vs_baseline=+0.00004
+  [GroupKFold] Ridge(alpha=100.0)           MAE=0.01993±0.00470  RMSE=0.02888  MedAE=0.01571  R2=-0.1940  ΔMAE_vs_baseline=-0.00280
+  [GroupKFold] RandomForest(200,md4)        MAE=0.02165±0.00888  RMSE=0.03124  MedAE=0.01748  R2=-0.5112  ΔMAE_vs_baseline=-0.00452
+  [GroupKFold] Ridge(alpha=10.0)            MAE=0.02382±0.00833  RMSE=0.03211  MedAE=0.02160  R2=-0.5718  ΔMAE_vs_baseline=-0.00669
+  [GroupKFold] Ridge(alpha=1.0)             MAE=0.02489±0.00874  RMSE=0.03294  MedAE=0.02237  R2=-0.6712  ΔMAE_vs_baseline=-0.00777
+  [GroupKFold] Ridge(alpha=0.1)             MAE=0.02503±0.00876  RMSE=0.03305  MedAE=0.02258  R2=-0.6834  ΔMAE_vs_baseline=-0.00790
+
+--- Q3a. Per-cell error breakdown (XGBoost production, out-of-fold) ---
+             n       mae      bias
+cell_name                         
+ASLRXAB341  54  0.019536  0.003629
+M83AB302    23  0.018311 -0.000985
+A167AB344a  54  0.015700 -0.003702
+A164AB302c  28  0.014921  0.001688
+
+--- Q3b. Per-exposure-phase error breakdown ---
+                n  exposure_range_min  exposure_range_max       mae
+phase                                                              
+Q1 (earliest)  40            1.207447           11.319414  0.029981
+Q2             40           11.387386           21.378306  0.011725
+Q3             39           21.432231           35.421899  0.015725
+Q4 (latest)    40           36.387519           56.285836  0.011505
+
+--- Q4. Feature importance (Pearson / XGBoost gain / permutation) ---
+                       pearson_corr  xgb_gain  permutation_importance
+FF_Lag1                   -0.399107  0.223404                0.000394
+Daily_Max_Temp_C           0.204950  0.140860                0.000130
+Rolling_Irradiance         0.099681  0.231935                0.000105
+Daily_Irradiance_Dose     -0.164102  0.163464                0.000102
+Rolling_Thermal_load       0.159576  0.078894                0.000102
+Daily_Median_Humidity      0.151883  0.161442                0.000075
+
+--- Overfitting gap (XGBoost production) ---
+  MAE full train     : 0.01640
+  MAE CV (KFold)     : 0.01721
+  Gap (CV - train)   : +0.00082 (reasonable gap)
+
+--- Verdict ---
+  Best model (KFold)   : Dummy(median) (MAE=0.01670)
+  Improvement vs base  : +2.5%
+  Signal with own lag  : r=-0.3991  (autocorrelated)
+  Degenerate target?   : 0.0% zeros, rel_std=7.018, skew=-4.13
+  => NO SIGNAL
+
+==========================================================================================
+ TARGET: Jsc_Delta (JSC)
+==========================================================================================
+
+--- Q1. Target descriptive statistics ---
+n_samples       159.000000
+mean             -0.004805
+median           -0.003971
+std               0.035427
+min              -0.109257
+max               0.102797
+skew             -0.211917
+pct_zero          0.000000
+pct_negative     61.006289
+
+  Signal strength:
+    Pearson with own lag : -0.0751
+    Fraction of zeros    : 0.00%
+    Relative std         : 7.3723
+    Skewness             : -0.2119
+
+--- Q2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---
+  [     KFold] RandomForest(200,md4)        MAE=0.01661±0.00252  RMSE=0.02276  MedAE=0.01251  R2=+0.5723  ΔMAE_vs_baseline=+0.00737
+  [     KFold] Ridge(alpha=1.0)             MAE=0.01699±0.00268  RMSE=0.02393  MedAE=0.01105  R2=+0.5267  ΔMAE_vs_baseline=+0.00699
+  [     KFold] Ridge(alpha=0.1)             MAE=0.01700±0.00270  RMSE=0.02394  MedAE=0.01114  R2=+0.5261  ΔMAE_vs_baseline=+0.00698
+  [     KFold] Ridge(alpha=10.0)            MAE=0.01703±0.00259  RMSE=0.02396  MedAE=0.01150  R2=+0.5258  ΔMAE_vs_baseline=+0.00695
+  [     KFold] Ridge(alpha=100.0)           MAE=0.01833±0.00282  RMSE=0.02641  MedAE=0.01208  R2=+0.4275  ΔMAE_vs_baseline=+0.00565
+  [     KFold] XGBoost(production)          MAE=0.01979±0.00189  RMSE=0.02910  MedAE=0.01183  R2=+0.3067  ΔMAE_vs_baseline=+0.00419
+  [     KFold] XGBoost(reg_lambda=100)      MAE=0.02374±0.00188  RMSE=0.03501  MedAE=0.01275  R2=-0.0080  ΔMAE_vs_baseline=+0.00024
+  [     KFold] Dummy(median)                MAE=0.02392±0.00178  RMSE=0.03521  MedAE=0.01365  R2=-0.0204  ΔMAE_vs_baseline=+0.00006
+  [     KFold] Dummy(mean)                  MAE=0.02398±0.00184  RMSE=0.03532  MedAE=0.01326  R2=-0.0265  ΔMAE_vs_baseline=+0.00000
+
+  [GroupKFold] RandomForest(200,md4)        MAE=0.01736±0.00403  RMSE=0.02339  MedAE=0.01303  R2=+0.5249  ΔMAE_vs_baseline=+0.00662
+  [GroupKFold] Ridge(alpha=10.0)            MAE=0.01903±0.00364  RMSE=0.02609  MedAE=0.01521  R2=+0.3871  ΔMAE_vs_baseline=+0.00495
+  [GroupKFold] Ridge(alpha=1.0)             MAE=0.01912±0.00371  RMSE=0.02609  MedAE=0.01448  R2=+0.3824  ΔMAE_vs_baseline=+0.00486
+  [GroupKFold] Ridge(alpha=0.1)             MAE=0.01914±0.00371  RMSE=0.02610  MedAE=0.01457  R2=+0.3812  ΔMAE_vs_baseline=+0.00484
+  [GroupKFold] Ridge(alpha=100.0)           MAE=0.01999±0.00369  RMSE=0.02814  MedAE=0.01451  R2=+0.3223  ΔMAE_vs_baseline=+0.00399
+  [GroupKFold] XGBoost(production)          MAE=0.02136±0.00385  RMSE=0.03115  MedAE=0.01244  R2=+0.1941  ΔMAE_vs_baseline=+0.00262
+  [GroupKFold] XGBoost(reg_lambda=100)      MAE=0.02484±0.00454  RMSE=0.03579  MedAE=0.01485  R2=-0.0458  ΔMAE_vs_baseline=-0.00086
+  [GroupKFold] Dummy(median)                MAE=0.02485±0.00460  RMSE=0.03584  MedAE=0.01483  R2=-0.0479  ΔMAE_vs_baseline=-0.00087
+  [GroupKFold] Dummy(mean)                  MAE=0.02497±0.00450  RMSE=0.03596  MedAE=0.01473  R2=-0.0570  ΔMAE_vs_baseline=-0.00099
+
+--- Q3a. Per-cell error breakdown (XGBoost production, out-of-fold) ---
+             n       mae      bias
+cell_name                         
+M83AB302    23  0.027454 -0.009920
+ASLRXAB341  54  0.019797  0.001600
+A164AB302c  28  0.017980  0.007954
+A167AB344a  54  0.017494 -0.002751
+
+--- Q3b. Per-exposure-phase error breakdown ---
+                n  exposure_range_min  exposure_range_max       mae
+phase                                                              
+Q1 (earliest)  40            1.207447           11.319414  0.024913
+Q2             40           11.387386           21.378306  0.014250
+Q3             39           21.432231           35.421899  0.020097
+Q4 (latest)    40           36.387519           56.285836  0.019959
+
+--- Q4. Feature importance (Pearson / XGBoost gain / permutation) ---
+                       pearson_corr  xgb_gain  permutation_importance
+Daily_Irradiance_Dose      0.714550  0.564242                0.007331
+Jsc_Lag1                  -0.075069  0.114046                0.000680
+Rolling_Thermal_load      -0.165412  0.108694                0.000635
+Daily_Median_Humidity     -0.200051  0.110225                0.000619
+Rolling_Irradiance         0.313479  0.050244                0.000473
+Daily_Max_Temp_C           0.086238  0.052550                0.000178
+
+--- Overfitting gap (XGBoost production) ---
+  MAE full train     : 0.01775
+  MAE CV (KFold)     : 0.01979
+  Gap (CV - train)   : +0.00204 (reasonable gap)
+
+--- Verdict ---
+  Best model (KFold)   : RandomForest(200,md4) (MAE=0.01661)
+  Improvement vs base  : +30.7%
+  Signal with own lag  : r=-0.0751  (no autocorrelation)
+  Degenerate target?   : 0.0% zeros, rel_std=7.372, skew=-0.21
+  => REAL SIGNAL
+
+==========================================================================================
+ TARGET: Voc_Delta (VOC)
+==========================================================================================
+
+--- Q1. Target descriptive statistics ---
+n_samples       159.000000
+mean             -0.001583
+median           -0.002231
+std               0.009727
+min              -0.035056
+max               0.038942
+skew              0.420260
+pct_zero          0.000000
+pct_negative     66.037736
+
+  Signal strength:
+    Pearson with own lag : +0.0553
+    Fraction of zeros    : 0.00%
+    Relative std         : 6.1432
+    Skewness             : +0.4203
+
+--- Q2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---
+  [     KFold] RandomForest(200,md4)        MAE=0.00550±0.00043  RMSE=0.00783  MedAE=0.00388  R2=+0.3026  ΔMAE_vs_baseline=+0.00108
+  [     KFold] Ridge(alpha=100.0)           MAE=0.00555±0.00108  RMSE=0.00784  MedAE=0.00408  R2=+0.3169  ΔMAE_vs_baseline=+0.00104
+  [     KFold] Ridge(alpha=10.0)            MAE=0.00558±0.00094  RMSE=0.00763  MedAE=0.00412  R2=+0.3474  ΔMAE_vs_baseline=+0.00100
+  [     KFold] Ridge(alpha=1.0)             MAE=0.00564±0.00089  RMSE=0.00766  MedAE=0.00411  R2=+0.3406  ΔMAE_vs_baseline=+0.00095
+  [     KFold] Ridge(alpha=0.1)             MAE=0.00565±0.00088  RMSE=0.00767  MedAE=0.00412  R2=+0.3395  ΔMAE_vs_baseline=+0.00094
+  [     KFold] Dummy(median)                MAE=0.00650±0.00100  RMSE=0.00962  MedAE=0.00424  R2=-0.0383  ΔMAE_vs_baseline=+0.00008
+  [     KFold] Dummy(mean)                  MAE=0.00659±0.00102  RMSE=0.00965  MedAE=0.00402  R2=-0.0435  ΔMAE_vs_baseline=+0.00000
+  [     KFold] XGBoost(production)          MAE=0.00659±0.00102  RMSE=0.00965  MedAE=0.00402  R2=-0.0435  ΔMAE_vs_baseline=-0.00000
+  [     KFold] XGBoost(reg_lambda=100)      MAE=0.00659±0.00102  RMSE=0.00965  MedAE=0.00402  R2=-0.0435  ΔMAE_vs_baseline=-0.00000
+
+  [GroupKFold] Ridge(alpha=100.0)           MAE=0.00608±0.00229  RMSE=0.00807  MedAE=0.00487  R2=+0.2102  ΔMAE_vs_baseline=+0.00051
+  [GroupKFold] RandomForest(200,md4)        MAE=0.00613±0.00203  RMSE=0.00802  MedAE=0.00503  R2=+0.1948  ΔMAE_vs_baseline=+0.00045
+  [GroupKFold] Ridge(alpha=10.0)            MAE=0.00634±0.00191  RMSE=0.00825  MedAE=0.00496  R2=+0.1278  ΔMAE_vs_baseline=+0.00024
+  [GroupKFold] Ridge(alpha=1.0)             MAE=0.00645±0.00187  RMSE=0.00838  MedAE=0.00519  R2=+0.0888  ΔMAE_vs_baseline=+0.00013
+  [GroupKFold] Ridge(alpha=0.1)             MAE=0.00647±0.00187  RMSE=0.00840  MedAE=0.00521  R2=+0.0836  ΔMAE_vs_baseline=+0.00012
+  [GroupKFold] Dummy(median)                MAE=0.00663±0.00295  RMSE=0.00937  MedAE=0.00432  R2=-0.0388  ΔMAE_vs_baseline=-0.00004
+  [GroupKFold] XGBoost(production)          MAE=0.00671±0.00273  RMSE=0.00944  MedAE=0.00442  R2=-0.0745  ΔMAE_vs_baseline=-0.00012
+  [GroupKFold] XGBoost(reg_lambda=100)      MAE=0.00671±0.00273  RMSE=0.00944  MedAE=0.00442  R2=-0.0745  ΔMAE_vs_baseline=-0.00012
+  [GroupKFold] Dummy(mean)                  MAE=0.00671±0.00273  RMSE=0.00944  MedAE=0.00442  R2=-0.0745  ΔMAE_vs_baseline=-0.00012
+
+--- Q3a. Per-cell error breakdown (XGBoost production, out-of-fold) ---
+             n       mae      bias
+cell_name                         
+M83AB302    23  0.009652  0.003098
+ASLRXAB341  54  0.009087  0.000677
+A167AB344a  54  0.004349 -0.001175
+A164AB302c  28  0.003541 -0.001602
+
+--- Q3b. Per-exposure-phase error breakdown ---
+                n  exposure_range_min  exposure_range_max       mae
+phase                                                              
+Q1 (earliest)  40            1.207447           11.319414  0.010360
+Q2             40           11.387386           21.378306  0.003562
+Q3             39           21.432231           35.421899  0.006232
+Q4 (latest)    40           36.387519           56.285836  0.006169
+
+--- Q4. Feature importance (Pearson / XGBoost gain / permutation) ---
+                       pearson_corr  xgb_gain  permutation_importance
+Daily_Irradiance_Dose      0.579680       0.0                     0.0
+Daily_Max_Temp_C           0.328858       0.0                     0.0
+Daily_Median_Humidity     -0.026847       0.0                     0.0
+Rolling_Irradiance         0.402287       0.0                     0.0
+Rolling_Thermal_load      -0.097493       0.0                     0.0
+Voc_Lag1                   0.055268       0.0                     0.0
+
+--- Overfitting gap (XGBoost production) ---
+  MAE full train     : 0.00650
+  MAE CV (KFold)     : 0.00659
+  Gap (CV - train)   : +0.00009 (reasonable gap)
+
+--- Verdict ---
+  Best model (KFold)   : RandomForest(200,md4) (MAE=0.00550)
+  Improvement vs base  : +16.4%
+  Signal with own lag  : r=+0.0553  (no autocorrelation)
+  Degenerate target?   : 0.0% zeros, rel_std=6.143, skew=+0.42
+  => REAL SIGNAL
+
+==========================================================================================
+ GLOBAL SUMMARY — PREDICTABILITY OF EACH PHYSICAL PARAMETER
+==========================================================================================
+parameter            best_model  mae_best_cv  baseline_mae  improvement_pct     verdict
+      PCE RandomForest(200,md4)     0.011427      0.012952        11.773673 REAL SIGNAL
+       FF         Dummy(median)     0.016697      0.017125         2.498520   NO SIGNAL
+      JSC RandomForest(200,md4)     0.016613      0.023981        30.723211 REAL SIGNAL
+      VOC RandomForest(200,md4)     0.005503      0.006585        16.435095 REAL SIGNAL
+==========================================================================================
+

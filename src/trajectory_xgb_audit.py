@@ -1,9 +1,24 @@
 """
 Module: src/trajectory_xgb_audit.py
 Description: Empirical audit of the multivariate trajectory forecasting engines
-             (PCE, pFF, Jsc, Voc). Mirrors the diagnostic structure of
-             rul_xgb_audit.py but operates on the normalized-increment targets
-             used by 09_jv_mppt_trajectory_forecasting.py.
+             (PCE, FF, Jsc, Voc). Companion diagnostic to
+             09_jv_mppt_trajectory_forecasting.py.
+
+             Phase 1 — Diagnostic phase. Answers four questions per parameter:
+
+               Q1. Is the target predictable in principle?
+                   (signal strength: correlation with its own lag, variance,
+                   proportion of zeros, skewness.)
+
+               Q2. Which model family wins under strict cross-validation?
+                   (trivial baselines, Ridge, RandomForest, XGBoost variants,
+                   under both KFold and GroupKFold-by-cell.)
+
+               Q3. Where does the error concentrate?
+                   (per-cell breakdown and per-exposure-day breakdown.)
+
+               Q4. Which features actually drive the prediction?
+                   (Pearson, XGBoost gain, permutation importance.)
 
              The full audit report is automatically written to
              `outputs/diagnostics/trajectory_audit_summary.txt` while still
@@ -37,7 +52,6 @@ from sklearn.metrics import (
     root_mean_squared_error,
 )
 from sklearn.model_selection import (
-    BaseCrossValidator,
     GroupKFold,
     KFold,
     cross_val_predict,
@@ -55,31 +69,35 @@ from src.config import (
     DIAGNOSTICS_DIR,
 )
 
-# ------------------------------------------------------------------------------
-# Module-level logging
-# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Logging + dynamic import of the trajectory module
+# ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("Trajectory-Audit")
 
-
-# ------------------------------------------------------------------------------
-# Dynamic import of the trajectory module (its filename starts with a digit).
-# ------------------------------------------------------------------------------
 _traj_mod = importlib.import_module("src.09_jv_mppt_trajectory_forecasting")
 build_trajectory_matrix = _traj_mod.build_trajectory_matrix
 BASE_FEATURES = _traj_mod.BASE_FEATURES
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Audit configuration
-# ------------------------------------------------------------------------------
+# ==============================================================================
 N_SPLITS = 5
 N_PERMUTATION_REPEATS = 20
 OVERFIT_GAP_RATIO = 0.30
-VERDICT_THRESHOLDS = {"weak": 3.0, "real": 10.0}
+
+# Signal-strength thresholds (percentage improvement over the trivial
+# Dummy(mean) baseline under KFold).
+SIGNAL_THRESHOLDS = {"none": 3.0, "weak": 10.0}
+
+# Minimum absolute Pearson correlation between a target and its own lag
+# feature required to consider the target "mean-reverting / autodependent".
+AUTOCORR_MIN = 0.10
 
 AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "trajectory_audit_summary.txt"
 
@@ -91,14 +109,14 @@ SCORING = {
 }
 METRIC_SIGNS = {"MAE": -1, "RMSE": -1, "MedAE": -1, "R2": 1}
 
-TARGET_PARAMS = ["PCE", "pFF", "Jsc", "Voc"]
+TARGET_PARAMS = ["PCE", "FF", "Jsc", "Voc"]
 
 
-# ------------------------------------------------------------------------------
-# Stdout tee utility
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Stdout tee
+# ==============================================================================
 class _Tee:
-    """Duplicate every write/flush to multiple streams."""
+    """File-like object duplicating every write/flush to multiple streams."""
 
     def __init__(self, *streams: TextIO) -> None:
         self._streams = streams
@@ -113,13 +131,14 @@ class _Tee:
             stream.flush()
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Target specification
-# ------------------------------------------------------------------------------
+# ==============================================================================
 @dataclass(frozen=True)
 class TargetSpec:
     key: str
     target_column: str
+    lag_feature: str
     features: list[str]
     xgb_params: Mapping
 
@@ -131,15 +150,16 @@ def _build_specs() -> list[TargetSpec]:
         specs.append(TargetSpec(
             key=param.lower(),
             target_column=f"{param}_Delta",
+            lag_feature=f"{param}_Lag1",
             features=BASE_FEATURES + [f"{param}_Lag1"],
             xgb_params=XGB_PARAMS_RUL_PCE,
         ))
     return specs
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Data loading
-# ------------------------------------------------------------------------------
+# ==============================================================================
 def load_trajectory_matrix() -> pd.DataFrame:
     """Load the healthy cohort and build the normalized-increment matrix."""
     df_healthy = pd.read_parquet(FILE_HEALTHY_COHORT)
@@ -150,9 +170,9 @@ def load_trajectory_matrix() -> pd.DataFrame:
     return df_daily
 
 
-# ------------------------------------------------------------------------------
-# Descriptive statistics
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Q1 — Descriptive statistics and signal strength
+# ==============================================================================
 def describe_target(y: pd.Series) -> pd.Series:
     n = len(y)
     return pd.Series({
@@ -168,9 +188,32 @@ def describe_target(y: pd.Series) -> pd.Series:
     })
 
 
-# ------------------------------------------------------------------------------
-# Model zoo
-# ------------------------------------------------------------------------------
+def signal_strength_report(
+    X: pd.DataFrame,
+    y: pd.Series,
+    lag_feature: str,
+) -> dict:
+    """
+    Compute simple, interpretable signal-strength metrics on the target:
+      - Pearson correlation with the lag feature (autodependence).
+      - Fraction of zero values (degenerate target).
+      - Relative std (std / |mean|), to gauge dynamic range.
+      - Skewness.
+    """
+    corr_with_lag = float(X[lag_feature].corr(y)) if lag_feature in X.columns else np.nan
+    pct_zero = float(100 * (y == 0).sum() / len(y))
+    rel_std = float(y.std() / (abs(y.mean()) + 1e-9))
+    return {
+        "pearson_with_lag": corr_with_lag,
+        "pct_zero": pct_zero,
+        "relative_std": rel_std,
+        "skew": float(skew(y)),
+    }
+
+
+# ==============================================================================
+# Q2 — Model zoo and cross-validation
+# ==============================================================================
 def build_model_zoo(xgb_params: Mapping) -> dict[str, BaseEstimator]:
     xgb_alt_reg = dict(xgb_params)
     xgb_alt_reg["reg_lambda"] = 100.0
@@ -222,9 +265,77 @@ def print_cv_table(df_scores: pd.DataFrame, baseline_mae: float) -> None:
         )
 
 
-# ------------------------------------------------------------------------------
-# Feature importance
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Q3 — Where does the error concentrate?
+# ==============================================================================
+def per_cell_breakdown(
+    model: BaseEstimator,
+    X: pd.DataFrame,
+    y: pd.Series,
+    groups: pd.Series,
+    cv,
+) -> pd.DataFrame:
+    """
+    Out-of-fold predictions per cell, aggregated to per-cell MAE and bias.
+    Requires GroupKFold-like split or any cv that produces out-of-fold preds.
+    """
+    oof = cross_val_predict(clone(model), X, y, cv=cv, n_jobs=-1)
+    df = pd.DataFrame({
+        "cell_name": groups.values,
+        "y_true": y.values,
+        "y_pred": oof,
+    })
+    df["abs_err"] = (df["y_true"] - df["y_pred"]).abs()
+    df["bias"] = df["y_true"] - df["y_pred"]
+
+    agg = df.groupby("cell_name").agg(
+        n=("y_true", "size"),
+        mae=("abs_err", "mean"),
+        bias=("bias", "mean"),
+    ).sort_values("mae", ascending=False)
+    return agg
+
+
+def per_phase_breakdown(
+    model: BaseEstimator,
+    X: pd.DataFrame,
+    y: pd.Series,
+    exposure: pd.Series,
+    cv,
+    n_bins: int = 4,
+) -> pd.DataFrame:
+    """
+    Out-of-fold error aggregated across quantile bins of the exposure day.
+    Reveals whether the model is systematically better/worse at early vs
+    late stages of the cell's life.
+    """
+    oof = cross_val_predict(clone(model), X, y, cv=cv, n_jobs=-1)
+    df = pd.DataFrame({
+        "exposure": exposure.values,
+        "y_true": y.values,
+        "y_pred": oof,
+    })
+    df["abs_err"] = (df["y_true"] - df["y_pred"]).abs()
+
+    try:
+        df["phase"] = pd.qcut(df["exposure"], q=n_bins, labels=[
+            "Q1 (earliest)", "Q2", "Q3", "Q4 (latest)",
+        ], duplicates="drop")
+    except ValueError:
+        return pd.DataFrame()
+
+    agg = df.groupby("phase", observed=True).agg(
+        n=("y_true", "size"),
+        exposure_range_min=("exposure", "min"),
+        exposure_range_max=("exposure", "max"),
+        mae=("abs_err", "mean"),
+    )
+    return agg
+
+
+# ==============================================================================
+# Q4 — Feature importance
+# ==============================================================================
 def compute_feature_importances(
     model: BaseEstimator,
     X: pd.DataFrame,
@@ -253,9 +364,9 @@ def compute_feature_importances(
     }).sort_values("permutation_importance", ascending=False)
 
 
-# ------------------------------------------------------------------------------
-# Overfitting gap
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Overfit gap
+# ==============================================================================
 def compute_overfit_gap(
     model: BaseEstimator,
     X: pd.DataFrame,
@@ -269,73 +380,92 @@ def compute_overfit_gap(
     return train_mae, gap, verdict
 
 
-# ------------------------------------------------------------------------------
-# Residual diagnostics
-# ------------------------------------------------------------------------------
-def compute_residual_diagnostics(
-    model: BaseEstimator,
-    X: pd.DataFrame,
-    y: pd.Series,
-    cv,
-    groups: pd.Series | None,
-):
-    oof_pred = cross_val_predict(clone(model), X, y, cv=cv, n_jobs=-1)
-    residuals = y.to_numpy() - oof_pred
-    resid_corr = pd.Series(
-        {col: np.corrcoef(X[col], residuals)[0, 1] for col in X.columns}
-    ).sort_values(key=np.abs, ascending=False)
-    resid_by_group = None
-    if groups is not None:
-        resid_by_group = pd.Series(residuals, index=X.index).groupby(groups).mean().sort_values()
-    return residuals, resid_corr, resid_by_group
+# ==============================================================================
+# Verdict per parameter
+# ==============================================================================
+def parameter_verdict(
+    best_model: str,
+    best_mae: float,
+    baseline_mae: float,
+    signal: dict,
+) -> str:
+    """
+    Classify the parameter's predictability using both the CV improvement and
+    the signal-strength metrics computed above.
+    """
+    improvement_pct = 100 * (baseline_mae - best_mae) / baseline_mae if baseline_mae > 0 else 0.0
 
-
-# ------------------------------------------------------------------------------
-# Verdict
-# ------------------------------------------------------------------------------
-def print_verdict(best_model: str, best_mae: float, baseline_mae: float) -> None:
-    improvement_pct = 100 * (baseline_mae - best_mae) / baseline_mae
-    if improvement_pct < VERDICT_THRESHOLDS["weak"]:
-        verdict = "NO RELEVANT SIGNAL"
-    elif improvement_pct < VERDICT_THRESHOLDS["real"]:
-        verdict = "WEAK SIGNAL"
+    if improvement_pct < SIGNAL_THRESHOLDS["none"]:
+        cv_verdict = "NO SIGNAL"
+    elif improvement_pct < SIGNAL_THRESHOLDS["weak"]:
+        cv_verdict = "WEAK SIGNAL"
     else:
-        verdict = "REAL PREDICTIVE SIGNAL"
-    print(f"  Best model (KFold)  : {best_model} (MAE={best_mae:.5f})")
-    print(f"  Improvement vs base : {improvement_pct:+.1f}%")
-    print(f"  => {verdict}")
+        cv_verdict = "REAL SIGNAL"
+
+    lag_corr = signal["pearson_with_lag"]
+    if np.isnan(lag_corr):
+        auto_verdict = "lag unavailable"
+    elif abs(lag_corr) < AUTOCORR_MIN:
+        auto_verdict = "no autocorrelation"
+    else:
+        auto_verdict = "autocorrelated"
+
+    print(f"  Best model (KFold)   : {best_model} (MAE={best_mae:.5f})")
+    print(f"  Improvement vs base  : {improvement_pct:+.1f}%")
+    print(f"  Signal with own lag  : r={lag_corr:+.4f}  ({auto_verdict})")
+    print(f"  Degenerate target?   : {signal['pct_zero']:.1f}% zeros, "
+          f"rel_std={signal['relative_std']:.3f}, skew={signal['skew']:+.2f}")
+    print(f"  => {cv_verdict}")
+
+    return cv_verdict
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Per-parameter diagnostic
-# ------------------------------------------------------------------------------
-def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
+# ==============================================================================
+def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> dict:
+    """
+    Run the full diagnostic for one parameter and return a one-line summary
+    dict for the final cross-parameter table.
+    """
     print("=" * 90)
     print(f" TARGET: {spec.target_column} ({spec.key.upper()})")
     print("=" * 90)
 
-    if spec.target_column not in df_daily.columns:
-        print(f"  [SKIP] Column '{spec.target_column}' not present in the matrix.")
-        print()
-        return
+    summary = {
+        "parameter": spec.key.upper(),
+        "target": spec.target_column,
+        "verdict": "SKIPPED",
+        "mae_sensor": np.nan,
+        "mae_api": np.nan,
+    }
 
-    # Check that all required features exist
+    if spec.target_column not in df_daily.columns:
+        print(f"  [SKIP] Column '{spec.target_column}' not present in the matrix.\n")
+        return summary
+
     missing = [f for f in spec.features if f not in df_daily.columns]
     if missing:
-        print(f"  [SKIP] Missing features: {missing}")
-        print()
-        return
+        print(f"  [SKIP] Missing features: {missing}\n")
+        return summary
 
     X = df_daily[spec.features]
     y = df_daily[spec.target_column]
     groups = df_daily["cell_name"] if "cell_name" in df_daily.columns else None
+    exposure = df_daily["Exposure_Days"] if "Exposure_Days" in df_daily.columns else None
 
-    # 1. Descriptive stats
-    print("\n--- 1. Target descriptive statistics ---")
+    # ---------------------------------------------------------------- Q1
+    print("\n--- Q1. Target descriptive statistics ---")
     print(describe_target(y).to_string())
+    print("\n  Signal strength:")
+    signal = signal_strength_report(X, y, spec.lag_feature)
+    print(f"    Pearson with own lag : {signal['pearson_with_lag']:+.4f}")
+    print(f"    Fraction of zeros    : {signal['pct_zero']:.2f}%")
+    print(f"    Relative std         : {signal['relative_std']:.4f}")
+    print(f"    Skewness             : {signal['skew']:+.4f}")
 
-    # 2. Model comparison
-    print("\n--- 2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---")
+    # ---------------------------------------------------------------- Q2
+    print("\n--- Q2. Baseline vs models: KFold(shuffle) vs GroupKFold(cell_name) ---")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     models = build_model_zoo(dict(spec.xgb_params))
 
@@ -345,56 +475,97 @@ def diagnose_target(df_daily: pd.DataFrame, spec: TargetSpec) -> None:
 
     if groups is None:
         print("  (GroupKFold omitted: 'cell_name' column missing)")
-    elif groups.nunique() < N_SPLITS:
-        print(f"  (GroupKFold omitted: only {groups.nunique()} unique cells, "
-              f"need at least {N_SPLITS} for {N_SPLITS}-fold)")
+    elif groups.nunique() < 2:
+        print("  (GroupKFold omitted: less than 2 unique cells)")
     else:
         gkf = GroupKFold(n_splits=min(N_SPLITS, groups.nunique()))
         scores_groupkfold = evaluate_cv(models, X, y, list(gkf.split(X, y, groups)), "GroupKFold")
         print()
         print_cv_table(scores_groupkfold, baseline_mae)
 
-    # 3. Feature importance
-    print("\n--- 3. Feature importance (Pearson / XGBoost gain / permutation) ---")
+    # ---------------------------------------------------------------- Q3
+    print("\n--- Q3a. Per-cell error breakdown (XGBoost production, out-of-fold) ---")
     prod_model = xgb.XGBRegressor(**spec.xgb_params)
+    if groups is not None:
+        cell_table = per_cell_breakdown(prod_model, X, y, groups, kf)
+        print(cell_table.to_string())
+    else:
+        print("  (Skipped: no cell_name column)")
+
+    print("\n--- Q3b. Per-exposure-phase error breakdown ---")
+    if exposure is not None:
+        phase_table = per_phase_breakdown(prod_model, X, y, exposure, kf)
+        if phase_table.empty:
+            print("  (Skipped: insufficient data for quantile binning)")
+        else:
+            print(phase_table.to_string())
+    else:
+        print("  (Skipped: no Exposure_Days column)")
+
+    # ---------------------------------------------------------------- Q4
+    print("\n--- Q4. Feature importance (Pearson / XGBoost gain / permutation) ---")
     print(compute_feature_importances(prod_model, X, y).to_string())
 
-    # 4. Overfit gap
-    print("\n--- 4. Overfitting gap (XGBoost production) ---")
+    # ---------------------------------------------------------------- gap
+    print("\n--- Overfitting gap (XGBoost production) ---")
     cv_mae_prod = scores_kfold.loc[scores_kfold["model"] == "XGBoost(production)", "MAE_mean"].iloc[0]
     train_mae, gap, overfit_verdict = compute_overfit_gap(prod_model, X, y, cv_mae_prod)
     print(f"  MAE full train     : {train_mae:.5f}")
     print(f"  MAE CV (KFold)     : {cv_mae_prod:.5f}")
     print(f"  Gap (CV - train)   : {gap:+.5f} ({overfit_verdict})")
 
-    # 5. Residual diagnostics
-    print("\n--- 5. Out-of-sample residuals (cross_val_predict) ---")
-    residuals, resid_corr, resid_by_cell = compute_residual_diagnostics(prod_model, X, y, kf, groups)
-    print(f"  Global bias (residual mean) : {residuals.mean():+.6f}")
-    print(f"  Residual std                : {residuals.std():.6f}")
-    print("\n  Residual-feature correlation:")
-    print(resid_corr.to_string())
-    if resid_by_cell is not None:
-        print("\n  Mean residual bias per cell (out-of-fold):")
-        print(resid_by_cell.to_string())
-
-    # 6. Verdict
-    print("\n--- 6. Automatic verdict ---")
+    # ---------------------------------------------------------------- verdict
+    print("\n--- Verdict ---")
     best_row = scores_kfold.iloc[0]
-    print_verdict(best_row["model"], best_row["MAE_mean"], baseline_mae)
+    verdict = parameter_verdict(
+        best_row["model"], best_row["MAE_mean"], baseline_mae, signal,
+    )
+    print()
+
+    summary.update({
+        "verdict": verdict,
+        "mae_best_cv": float(best_row["MAE_mean"]),
+        "baseline_mae": float(baseline_mae),
+        "improvement_pct": float(100 * (baseline_mae - best_row["MAE_mean"]) / baseline_mae),
+        "best_model": best_row["model"],
+    })
+    return summary
+
+
+# ==============================================================================
+# Global summary across parameters
+# ==============================================================================
+def print_global_summary(summaries: list[dict]) -> None:
+    print("=" * 90)
+    print(" GLOBAL SUMMARY — PREDICTABILITY OF EACH PHYSICAL PARAMETER")
+    print("=" * 90)
+
+    df = pd.DataFrame(summaries)
+    display_cols = [
+        c for c in [
+            "parameter", "best_model", "mae_best_cv", "baseline_mae",
+            "improvement_pct", "verdict",
+        ] if c in df.columns
+    ]
+    if display_cols:
+        print(df[display_cols].to_string(index=False))
+    print("=" * 90)
     print()
 
 
-# ------------------------------------------------------------------------------
-# Entrypoint
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# Entry point
+# ==============================================================================
 def _run_audit() -> None:
     logger.info("Loading trajectory feature matrix for multivariate audit...")
     df_daily = load_trajectory_matrix()
     logger.info(f"Rows: {len(df_daily)} | Cells: {df_daily['cell_name'].nunique()}")
 
+    summaries: list[dict] = []
     for spec in _build_specs():
-        diagnose_target(df_daily, spec)
+        summaries.append(diagnose_target(df_daily, spec))
+
+    print_global_summary(summaries)
 
 
 def main() -> None:

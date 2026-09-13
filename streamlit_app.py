@@ -47,6 +47,8 @@ from src.config import (
     FILE_BURN_IN_GRID,
     FILE_TRAJECTORY_LOOCV,
     FILE_TRAJECTORY_PRODUCTION,
+    FILE_RUL_COEFFS_CALIBRATED,
+    FILE_TRAJECTORY_COEFFS_CALIBRATED,
     DIAGNOSTICS_DIR,
 )
 
@@ -365,6 +367,16 @@ def load_full_pff_history() -> pd.DataFrame:
         st.warning(f"Failed to load full pFF history: {exc}")
         return pd.DataFrame()
 
+@st.cache_data(show_spinner=False)
+def _load_trajectory_calibration() -> dict:
+    """Read the trajectory k_blend calibration JSON (written by the optimizer)."""
+    try:
+        if FILE_TRAJECTORY_COEFFS_CALIBRATED.exists():
+            with FILE_TRAJECTORY_COEFFS_CALIBRATED.open(encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
 # =====================================================================
 # 4. CHART-BUILDING UTILITIES
@@ -1942,6 +1954,22 @@ def _render_combined_twin_audit_expander(
                     st.markdown("* *None*")
                 st.markdown(f"**3. Final Validated Production Cohort:**\n`{', '.join(production_cohort) if production_cohort else 'N/A'}`")
 
+@st.cache_data(show_spinner=False)
+def _read_calibration_metadata(json_path: Path) -> dict:
+    """Read the metadata block of the calibration JSON, if present."""
+    try:
+        if json_path.exists():
+            with json_path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "k_blend": float(data.get("k_blend", 0.0)),
+                "t_ref": float(data.get("t_ref", 50.0)),
+                "mae_sensor": data.get("metadata", {}).get("mae_sensor"),
+                "mae_api": data.get("metadata", {}).get("mae_api"),
+            }
+    except Exception:
+        pass
+    return {}
 
 def _render_rul_simulation_expander(
     df_daily: pd.DataFrame,
@@ -1960,7 +1988,7 @@ def _render_rul_simulation_expander(
     if not available_cells:
         return
 
-    expander = st.expander("RUL Forecasting & Model Audit", expanded=True)
+    expander = st.expander("RUL Forecasting & Model Audit", expanded=False)
     with expander:
         # --- DYNAMIC CELL SELECTOR ---
         header_col, selector_col = st.columns([2.5, 1])
@@ -1968,6 +1996,37 @@ def _render_rul_simulation_expander(
             st.markdown("#### Kinematic Remaining Useful Life (PCE) Validation")
             st.caption("Predictive capacity audit: Local physical sensors vs. Calibrated Open-Meteo satellite weather against T80 collapse Ground Truth.")
 
+            # Read calibration metadata (from the JSON written by the optimizer)
+            from src.config import FILE_RUL_COEFFS_CALIBRATED
+            calib_info = _read_calibration_metadata(FILE_RUL_COEFFS_CALIBRATED)
+            if calib_info:
+                k_blend = calib_info.get("k_blend", 0.0)
+                t_ref = calib_info.get("t_ref", 50.0)
+                mae_s = calib_info.get("mae_sensor")
+                mae_a = calib_info.get("mae_api")
+                if mae_s is not None and mae_a is not None:
+                    st.caption(
+                        f"**Engine status:** calibrated · "
+                        f"k_blend = **{k_blend:.2f}** (weight of temporal baseline) · "
+                        f"t_ref = **{t_ref:.1f} d** "
+                        f"· global LOOCV MAE: sensor {mae_s:.2f} d / API {mae_a:.2f} d"
+                    )
+                else:
+                    st.caption(f"**Engine status:** calibrated (k_blend={k_blend:.2f}, t_ref={t_ref:.1f} d)")
+
+                with st.expander(" Blend formulation", expanded=False):
+                    st.markdown("The final RUL reported below mixes two predictions:")
+                    st.latex(
+                        r"R_{\text{final}}(t) \;=\; (1 - k_{\text{blend}}) \cdot R_{\text{engine}}(t)"
+                        r" \;+\; k_{\text{blend}} \cdot \max\!\left(0,\ t_{\text{ref}} - t\right)"
+                    )
+                    st.caption(
+                        f"where $k_{{\\text{{blend}}}}$ weights the temporal baseline "
+                        f"(currently **{k_blend:.2f}**) and $t_{{\\text{{ref}}}}$ is the "
+                        f"expected cell lifetime (currently **{t_ref:.0f} days**)."
+                    )
+            else:
+                st.caption("**Engine status:** using hardcoded defaults (no calibration JSON found)")
         with selector_col:
             default_index = available_cells.index(target_cell) if target_cell in available_cells else 0
             selected_cell = st.selectbox(
@@ -2113,11 +2172,151 @@ def _render_rul_simulation_expander(
             )
             st.plotly_chart(fig_inc, width='stretch', config=PLOTLY_CONFIG)
 
+        # ------------------------------------------------------------------
+        # Blend decomposition (only if blend is active)
+        # ------------------------------------------------------------------
+        st.markdown("<hr style='margin: 1.2rem 0; opacity: 0.2;'>", unsafe_allow_html=True)
+        st.markdown(f"##### Blend Decomposition — `{selected_cell}`")
+        st.caption(
+            "Visual breakdown of the temporal-baseline blend: engine prediction (before blend), "
+            "clock prediction (t_ref − t), and the final blended RUL that is actually reported."
+        )
+
+        if calib_info and calib_info.get("k_blend", 0.0) > 0.0:
+            k_blend = calib_info["k_blend"]
+            t_ref = calib_info["t_ref"]
+
+            # Recover the engine-only prediction by inverting the blend:
+            #   RUL_final = (1-k) * RUL_engine + k * RUL_temporal
+            #   => RUL_engine = (RUL_final - k * RUL_temporal) / (1-k)
+            df_blend = df_sens.copy()
+            df_blend["RUL_temporal"] = (t_ref - df_blend["Anchor_Day"]).clip(lower=0)
+            df_blend["RUL_engine"] = (
+                df_blend["RUL_Pred"] - k_blend * df_blend["RUL_temporal"]
+            ) / (1.0 - k_blend)
+
+            fig_blend = go.Figure()
+            fig_blend.add_trace(go.Scatter(
+                x=df_blend["Anchor_Day"], y=df_blend["RUL_Real"],
+                mode="lines", name="Ground Truth",
+                line=dict(color="#10B981", width=2.5, dash="dot"),
+            ))
+            fig_blend.add_trace(go.Scatter(
+                x=df_blend["Anchor_Day"], y=df_blend["RUL_engine"],
+                mode="lines+markers", name="Engine (before blend)",
+                line=dict(color="#60A5FA", width=2, dash="dash"),
+                marker=dict(size=6),
+            ))
+            fig_blend.add_trace(go.Scatter(
+                x=df_blend["Anchor_Day"], y=df_blend["RUL_temporal"],
+                mode="lines", name=f"Clock (t_ref − t) · t_ref={t_ref:.0f}d",
+                line=dict(color="#94A3B8", width=1.5),
+            ))
+            fig_blend.add_trace(go.Scatter(
+                x=df_blend["Anchor_Day"], y=df_blend["RUL_Pred"],
+                mode="lines+markers", name=f"Blend (final) · k={k_blend:.2f}",
+                line=dict(color="#1E293B", width=2.5),
+                marker=dict(size=6),
+            ))
+            fig_blend.update_layout(
+                xaxis=dict(title="Anchor Day", showgrid=True, gridcolor="#F1F5F9"),
+                yaxis=dict(title="Remaining Days (RUL)", showgrid=True, gridcolor="#F1F5F9"),
+                height=340,
+                margin=dict(l=20, r=20, t=20, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                plot_bgcolor="white", paper_bgcolor="white",
+            )
+            st.plotly_chart(fig_blend, width="stretch", config=PLOTLY_CONFIG)
+        else:
+            st.info("Blend is disabled (k_blend = 0). The engine prediction and the final RUL are identical.")
+
+        # ------------------------------------------------------------------
+        # Per-cell error summary table
+        # ------------------------------------------------------------------
+        st.markdown("<hr style='margin: 1.2rem 0; opacity: 0.2;'>", unsafe_allow_html=True)
+        st.markdown("##### Per-Cell Error Summary")
+
+        summary_rows = []
+        for cell in available_cells:
+            s = df_sim_sensor[df_sim_sensor["cell_name"] == cell].sort_values("Anchor_Day")
+            a = df_sim_api[df_sim_api["cell_name"] == cell].sort_values("Anchor_Day")
+            if s.empty:
+                continue
+            t_surv = s["True_Survival_Days"].iloc[0]
+            s_real = t_surv - s["Anchor_Day"]
+            valid = s_real > 0
+            mae_s_cell = float(np.mean(np.abs(s.loc[valid, "RUL_Pred"] - s_real[valid]))) if valid.any() else np.nan
+            if not a.empty and valid.any():
+                a_real = t_surv - a.loc[valid, "Anchor_Day"]
+                mae_a_cell = float(np.mean(np.abs(a.loc[valid, "RUL_Pred"] - a_real)))
+            else:
+                mae_a_cell = np.nan
+            summary_rows.append({
+                "Cell": cell,
+                "True Survival (d)": t_surv,
+                "Sensor MAE (d)": mae_s_cell,
+                "API MAE (d)": mae_a_cell,
+            })
+
+        if summary_rows:
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                column_config={
+                    "True Survival (d)": st.column_config.NumberColumn(format="%.1f"),
+                    "Sensor MAE (d)": st.column_config.NumberColumn(format="%.2f"),
+                    "API MAE (d)": st.column_config.NumberColumn(format="%.2f"),
+                },
+                hide_index=True, width="stretch",
+            )
+
+def _compute_loocv_mae(
+    df_loocv: pd.DataFrame,
+    targets: list[str],
+    n_days: int,
+) -> dict:
+    """
+    Compute the per-parameter LOOCV MAE over the first `n_days` of the forecast
+    phase, excluding truncated cells (so the aggregate is comparable).
+    """
+    if df_loocv.empty or "Phase" not in df_loocv.columns:
+        return {}
+
+    df_f = df_loocv[df_loocv["Phase"] == "Forecast"].copy()
+    if "Forecast_Truncated" in df_f.columns:
+        df_f = df_f[~df_f["Forecast_Truncated"].fillna(False)]
+
+    result: dict = {}
+    for p in targets:
+        actual_col, pred_col = f"Actual_{p}", f"Pred_{p}"
+        if actual_col not in df_f.columns or pred_col not in df_f.columns:
+            continue
+        maes = []
+        for cell_name in df_f["cell_name"].unique():
+            sub = df_f[df_f["cell_name"] == cell_name].sort_values("Exposure_Days").head(n_days)
+            a, b = sub[actual_col], sub[pred_col]
+            mask = a.notna() & b.notna()
+            if mask.sum() == 0:
+                continue
+            maes.append(float(np.mean(np.abs(a[mask] - b[mask]))))
+        if maes:
+            result[p] = float(np.mean(maes))
+    return result
+
 def _render_trajectory_expander() -> None:
     """
     Render the trajectory forecast comparison: blind LOOCV model (sensor weather)
     vs. production Digital Twin (API-calibrated weather).
+
+    Horizon semantics:
+      - Chart 1 (LOOCV, sensor weather): simulation is bounded by the cell's own
+        sensor data, so the curve ends wherever the cell stopped reporting.
+      - Chart 2 (production, API weather): simulation runs for SIMULATION_HORIZON
+        days regardless of sensor lifespan.
     """
+    from src.config import FORECAST_HORIZON, EVALUATION_HORIZON, SIMULATION_HORIZON
+
+    TARGETS = ["PCE", "FF", "Jsc", "Voc"]
+
     df_loocv = load_trajectory_loocv()
     df_prod = load_trajectory_production()
 
@@ -2128,7 +2327,7 @@ def _render_trajectory_expander() -> None:
             (Leave-One-Cell-Out) but used **real sensor weather** for the forecast window.
 
             **Chart 2 · Production Digital Twin** — the model *knows* the cell (trained on
-            100% of the healthy cohort) but must rely on **API-forecast weather** (imperfect).
+            100% of the healthy cohort) but must rely on **API-calibrated weather** (imperfect).
             """
         )
 
@@ -2139,34 +2338,82 @@ def _render_trajectory_expander() -> None:
             )
             return
 
+        # ---------------- Per-cell truncation info ----------------
+        trunc_col = "Forecast_Truncated"
+        horizon_col = "Forecast_Horizon_Used"
+
+        def _trunc_info(df: pd.DataFrame) -> dict:
+            if trunc_col not in df.columns or horizon_col not in df.columns:
+                return {}
+            return (
+                df.groupby("cell_name")
+                .agg({trunc_col: "first", horizon_col: "max"})
+                .to_dict("index")
+            )
+
+        info_loocv = _trunc_info(df_loocv)
+        info_prod = _trunc_info(df_prod)
+
+        # ---------------- Selectors ----------------
         c1, c2 = st.columns(2)
         with c1:
             param = st.selectbox(
                 "Physical parameter",
-                ["PCE", "pFF", "Jsc", "Voc"],
+                TARGETS,
                 key="traj_param",
             )
         with c2:
             cells = sorted(set(df_loocv["cell_name"]) | set(df_prod["cell_name"]))
-            cell = st.selectbox("Cell", cells, key="traj_cell")
+            cell_labels: dict[str, str] = {}
+            for c in cells:
+                meta = info_loocv.get(c) or info_prod.get(c) or {}
+                if meta.get(trunc_col):
+                    n_used = int(meta.get(horizon_col, 0))
+                    cell_labels[c] = f"{c}  ⚠ partial ({n_used}/{EVALUATION_HORIZON}d)"
+                else:
+                    cell_labels[c] = c
+
+            display_label = st.selectbox(
+                "Cell",
+                options=[cell_labels[c] for c in cells],
+                key="traj_cell",
+            )
+            cell = next(c for c, label in cell_labels.items() if label == display_label)
+
+        meta_sel = info_loocv.get(cell) or info_prod.get(cell) or {}
+        is_truncated = bool(meta_sel.get(trunc_col, False))
+        horizon_used = int(meta_sel.get(horizon_col, EVALUATION_HORIZON))
+
+        if is_truncated:
+            st.warning(
+                f"⚠️ **Partial forecast:** `{cell}` has only {horizon_used} future days "
+                f"of ground truth available (the full evaluation horizon is {EVALUATION_HORIZON}). "
+                "The trajectory is truncated to the available window and this cell is "
+                "**excluded from the aggregate MAE** reported below, because its "
+                "evaluation window is not comparable to the full one."
+            )
+
+        # ---------------- The two charts ----------------
+        validation_end = float(ANCHOR_DAY) + float(EVALUATION_HORIZON)
 
         col1, col2 = st.columns(2)
-
         panels = [
-            (col1, df_loocv, "Chart 1 · Blind model (LOOCV) · Sensor weather"),
-            (col2, df_prod, "Chart 2 · Production Digital Twin · API weather"),
+            (col1, df_loocv, "Chart 1 · Blind model (LOOCV) · Sensor weather", "loocv"),
+            (col2, df_prod, "Chart 2 · Production Digital Twin · API weather", "production"),
         ]
 
-        for col, df, title in panels:
+        for col, df, title, scenario_key in panels:
             with col:
                 st.subheader(title)
-                sub = df[df["cell_name"] == cell].sort_values("Exposure_Days")
+                sub = df[df["cell_name"] == cell].sort_values("Exposure_Days").copy()
 
                 if sub.empty:
                     st.info("No data for this cell in this scenario.")
                     continue
 
                 fig = go.Figure()
+
+                # Actual
                 fig.add_trace(go.Scatter(
                     x=sub["Exposure_Days"],
                     y=sub[f"Actual_{param}"],
@@ -2175,6 +2422,7 @@ def _render_trajectory_expander() -> None:
                     line=dict(color="#2E86AB", width=2),
                     marker=dict(size=6),
                 ))
+                # Predicted
                 fig.add_trace(go.Scatter(
                     x=sub["Exposure_Days"],
                     y=sub[f"Pred_{param}"],
@@ -2183,6 +2431,8 @@ def _render_trajectory_expander() -> None:
                     line=dict(color="#E63946", width=2, dash="dash"),
                     marker=dict(size=6),
                 ))
+
+                # Calibration window
                 fig.add_vrect(
                     x0=0, x1=ANCHOR_DAY,
                     fillcolor="lightgray",
@@ -2191,6 +2441,36 @@ def _render_trajectory_expander() -> None:
                     annotation_text=f"Calibration ({int(ANCHOR_DAY)} d)",
                     annotation_position="top left",
                 )
+
+                # Beyond validation window (amber). Applies whenever the
+                # simulation extends past ANCHOR_DAY + EVALUATION_HORIZON.
+                x_max_all = float(sub["Exposure_Days"].max())
+                if x_max_all > validation_end + 0.5:
+                    fig.add_vrect(
+                        x0=validation_end,
+                        x1=x_max_all,
+                        fillcolor="rgba(245, 158, 11, 0.06)",
+                        line_width=0,
+                        annotation_text="beyond validated horizon",
+                        annotation_position="bottom right",
+                        annotation_font=dict(size=9, color="#B45309"),
+                    )
+
+                # No ground truth (gray). Overlays the amber if applicable.
+                actual_valid = sub[sub[f"Actual_{param}"].notna()]
+                if not actual_valid.empty:
+                    x_last_actual = float(actual_valid["Exposure_Days"].max())
+                    if x_max_all > x_last_actual + 0.5:
+                        fig.add_vrect(
+                            x0=x_last_actual,
+                            x1=x_max_all,
+                            fillcolor="rgba(148, 163, 184, 0.14)",
+                            line_width=0,
+                            annotation_text="no ground truth",
+                            annotation_position="top right",
+                            annotation_font=dict(size=9, color="#475569"),
+                        )
+
                 fig.update_layout(
                     xaxis_title="Exposure days",
                     yaxis_title=param,
@@ -2198,8 +2478,187 @@ def _render_trajectory_expander() -> None:
                     margin=dict(l=20, r=20, t=40, b=20),
                     legend=dict(orientation="h", y=1.12, x=0),
                 )
-                st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                st.plotly_chart(
+                    fig,
+                    width="stretch",
+                    config=PLOTLY_CONFIG,
+                    key=f"traj_chart_{scenario_key}_{param}_{cell}",
+                )
 
+        # ======================================================================
+        # SUPPORTING CONTENT — validation, k_blend, MAE, audit verdict
+        # ======================================================================
+        st.markdown("---")
+
+        # ---------------- Validation window explainer ----------------
+        st.markdown("##### Horizon and validation window")
+        st.markdown(
+            f"""
+            - **Calibration** (day 0–{int(ANCHOR_DAY)}): the motor is anchored to
+              the cell's observed state at day {int(ANCHOR_DAY)}.
+            - **Validation** (day {int(ANCHOR_DAY)}–{int(validation_end)}): the first
+              {int(EVALUATION_HORIZON)} forecasted days. **All MAE metrics reported in
+              the audit refer to this window.**
+            - **Extrapolation** (day {int(validation_end)}+): predictions past the
+              validated horizon have no error guarantee. They are shown for
+              visualization only and are subject to autoregressive drift.
+            """
+        )
+
+        # ---------------- Persistence blend explainer ----------------
+        st.markdown("##### Persistence blend (k_blend)")
+        st.markdown(
+            r"""
+            The forecast mixes two components in a convex combination:
+
+            $$ P_{\text{final}} = (1 - k) \cdot P_{\text{motor}} + k \cdot P_{\text{anchor}} $$
+
+            - $k = 0$: pure kinematic motor — no stabilization, error can compound
+              autoregressively over the horizon.
+            - $k = 1$: pure persistence — the forecast is a constant line at the
+              anchor value; error can never grow, but no dynamics are captured.
+
+            The coefficient is calibrated empirically by sweeping $k \in [0,1]$
+            over the LOOCV MAE at the 14-day horizon. Values are pinned to $k=0$
+            when the blend improvement is below a 2% adoption filter.
+            """
+        )
+
+        calib = _load_trajectory_calibration()
+        k_values = calib.get("k_blend_per_param", {}) if isinstance(calib, dict) else {}
+        meta_calib = calib.get("metadata", {}) if isinstance(calib, dict) else {}
+        mae_at_k0 = meta_calib.get("mae_at_k0", {})
+        mae_at_kstar = meta_calib.get("mae_at_kstar", {})
+
+        if k_values:
+            rows = []
+            for p in TARGETS:
+                if p not in k_values:
+                    continue
+                k = float(k_values[p])
+                mae0 = mae_at_k0.get(p)
+                maestar = mae_at_kstar.get(p)
+                if mae0 and maestar and mae0 > 0:
+                    improvement = 100.0 * (mae0 - maestar) / mae0
+                else:
+                    improvement = np.nan
+                behavior = (
+                    "Pure motor" if k == 0 else
+                    "Pure persistence" if k == 1 else
+                    f"{int((1 - k) * 100)}% motor + {int(k * 100)}% persistence"
+                )
+                rows.append({
+                    "Parameter": p,
+                    "k*": k,
+                    "Blend behavior": behavior,
+                    "MAE @ k=0": mae0,
+                    "MAE @ k*": maestar,
+                    "Improvement": improvement,
+                })
+            df_k = pd.DataFrame(rows)
+            st.dataframe(
+                df_k,
+                column_config={
+                    "Parameter": st.column_config.TextColumn("Parameter"),
+                    "k*": st.column_config.NumberColumn("k*", format="%.2f"),
+                    "Blend behavior": st.column_config.TextColumn("Blend behavior"),
+                    "MAE @ k=0": st.column_config.NumberColumn("MAE @ k=0", format="%.4f"),
+                    "MAE @ k*": st.column_config.NumberColumn("MAE @ k*", format="%.4f"),
+                    "Improvement": st.column_config.NumberColumn("Improvement", format="%+.1f%%"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption(
+                "The MAE columns reflect the LOOCV sweep used for calibration "
+                "(14-day evaluation window, complete cells only). The blend choice "
+                "does **not** change the raw motor trajectory — it only rescales the "
+                "reported value, so the improvement column is a pure measure of how "
+                "much the persistence correction helps over the motor."
+            )
+        else:
+            st.info("No calibration JSON found. Run `python -m src.trajectory_calibration_optimizer`.")
+
+        # ---------------- MAE table ----------------
+        st.markdown("##### Forecast error (LOOCV, 14-day window)")
+        mae_loocv = _compute_loocv_mae(df_loocv, TARGETS, n_days=int(EVALUATION_HORIZON))
+
+        if mae_loocv:
+            df_mae = pd.DataFrame(
+                [{"Parameter": p, "MAE (14d, complete cells)": mae_loocv[p]} for p in TARGETS if p in mae_loocv]
+            )
+            st.dataframe(
+                df_mae,
+                column_config={
+                    "Parameter": st.column_config.TextColumn("Parameter"),
+                    "MAE (14d, complete cells)": st.column_config.NumberColumn(
+                        "MAE (14d, complete cells)", format="%.4f"
+                    ),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption(
+                f"MAE measured on the first {int(EVALUATION_HORIZON)} forecasted days, "
+                "averaged over complete cells only (truncated cells are excluded). "
+                "These are the values reported in the audit and the technical report."
+            )
+        else:
+            st.info("No LOOCV trajectories available to compute MAE.")
+
+        # ---------------- Why the two charts differ ----------------
+        st.markdown("##### Why Chart 1 and Chart 2 differ")
+        st.markdown(
+            """
+            Both charts are plotting the same physical reality (`Actual`), but their
+            `Predicted` curves can diverge substantially on long horizons. The reason
+            is threefold:
+
+            1. **Weather source shift.** Chart 1 is fed the same sensor weather the
+               model was trained on. Chart 2 is fed API-calibrated weather, which is
+               close but not identical.
+            2. **Autoregressive compounding.** The motor iterates day by day using its
+               own previous prediction as input. A 1–2% weather mismatch does not stay
+               constant: it accumulates every step, growing roughly like compound
+               interest over the horizon.
+            3. **Memorization under covariate shift.** The production model (Chart 2)
+               was trained on the target cell and therefore learned its specific
+               climate response. Under a weather-source shift, that memorization
+               amplifies the mismatch instead of smoothing it. The blind model
+               (Chart 1) is more robust precisely because it learned generic patterns.
+
+            The divergence is most visible past the validated horizon
+            (day > 28). It does **not** invalidate the model within the evaluated
+            14-day window.
+            """
+        )
+
+        # ---------------- Audit verdict per parameter ----------------
+        st.markdown("##### Audit verdict per parameter")
+        st.markdown(
+            """
+            From `src/trajectory_xgb_audit.py`. The verdict classifies whether the
+            parameter carries predictive signal that the kinematic motor can
+            actually exploit.
+            """
+        )
+        audit_rows = [
+            {"Parameter": "PCE", "Verdict": "In-cell signal",     "Interpretation": "Model captures the pattern but does not transfer across cells. Blend moderate."},
+            {"Parameter": "FF",  "Verdict": "No signal",          "Interpretation": "Model collapses to the mean. Blend pinned to k=1 (pure persistence)."},
+            {"Parameter": "Jsc", "Verdict": "Real signal",        "Interpretation": "Model learns a transferable, physically grounded pattern. Motor dominates."},
+            {"Parameter": "Voc", "Verdict": "Weak signal",        "Interpretation": "Blend improvement below the 2% filter. Pinned to k=0 (pure motor)."},
+        ]
+        st.dataframe(
+            pd.DataFrame(audit_rows),
+            column_config={
+                "Parameter": st.column_config.TextColumn("Parameter"),
+                "Verdict": st.column_config.TextColumn("Verdict"),
+                "Interpretation": st.column_config.TextColumn("Interpretation", width="large"),
+            },
+            hide_index=True,
+            width="stretch",
+        )   
+            
 def general_overview() -> None:
     """Render the "General Overview" page: fleet KPIs, telemetry, and Digital Twin diagnostics."""
     st.sidebar.markdown("<h4 style='font-size: 1.1rem; color: #1E293B; margin-bottom: 0;'>KPI Options</h4>", unsafe_allow_html=True)

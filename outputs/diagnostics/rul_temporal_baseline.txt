@@ -1,0 +1,48 @@
+
+  Anchor points reconstructed: 20
+  Cells: ['A164AB302c', 'A167AB344a', 'ASLRXAB341', 'M83AB302']
+
+==========================================================================================
+ TEMPORAL BASELINE — RUL_pred(t) = max(0, t_ref - t)
+==========================================================================================
+ No XGBoost, no physics, no weather. Just the clock.
+ Evaluating 18 candidate t_ref values on 20 (cell, anchor) points...
+
+  t_ref =   0.0 d | MAE_global = 16.639 d
+  t_ref =  10.0 d | MAE_global = 16.639 d
+  t_ref =  20.0 d | MAE_global = 15.305 d
+  t_ref =  30.0 d | MAE_global = 13.105 d
+  t_ref =  35.0 d | MAE_global = 13.047 d
+  t_ref =  40.0 d | MAE_global = 12.547 d
+  t_ref =  45.0 d | MAE_global = 11.688 d
+  t_ref =  50.0 d | MAE_global = 10.527 d
+  t_ref =  52.0 d | MAE_global =  9.927 d
+  t_ref =  54.0 d | MAE_global =  9.299 d
+  t_ref =  55.0 d | MAE_global =  9.415 d
+  t_ref =  56.0 d | MAE_global =  9.735 d
+  t_ref =  58.0 d | MAE_global = 11.535 d
+  t_ref =  60.0 d | MAE_global = 13.535 d
+  t_ref =  65.0 d | MAE_global = 18.535 d
+  t_ref =  70.0 d | MAE_global = 23.535 d
+  t_ref =  80.0 d | MAE_global = 33.535 d
+  t_ref =  90.0 d | MAE_global = 43.535 d
+
+==========================================================================================
+ TEMPORAL BASELINE — BEST
+==========================================================================================
+  Best t_ref  = 54.0 days
+  MAE         = 9.299 days
+  N           = 20
+
+  Per-cell MAE at best t_ref:
+    A164AB302c      : 25.520 d
+    A167AB344a      :  2.087 d
+    ASLRXAB341      :  0.334 d
+    M83AB302        : 30.823 d
+==========================================================================================
+
+  Reference: calibrated RUL engine (v3) sensor MAE = 6.28 d
+  → Temporal baseline is 3.02 d WORSE than the engine
+==========================================================================================
+
+  Results table saved -> outputs/diagnostics/rul_temporal_baseline.parquet

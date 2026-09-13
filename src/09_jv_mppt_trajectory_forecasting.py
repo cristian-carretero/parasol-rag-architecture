@@ -1,34 +1,89 @@
 """
 Module: src/09_jv_mppt_trajectory_forecasting.py
 Description: Multivariate autoregressive trajectory forecasting for physical
-parameters (PCE, pFF, Voc, Jsc). Trains independent XGBoost kinematics engines
-per parameter, using relative normalization and LOOCV to ensure out-of-sample
-physical generalization. Produces both the production models and the LOOCV
-trajectory artifacts consumed by the dashboard.
+parameters (PCE, FF, Jsc, Voc). Trains one independent regressor per parameter
+(XGBoost or RandomForest, selected per parameter from the trajectory audit),
+using relative normalization and LOOCV to ensure out-of-sample physical
+generalization. Produces both the production models and the LOOCV trajectory
+artifacts consumed by the dashboard.
+
+             The engine has two stages:
+
+               1. Kinematic motor (per parameter): a regressor that predicts
+                  the normalized daily increment, integrated forward over the
+                  forecast horizon. The model family is chosen per parameter:
+
+                    - PCE : XGBoost (better on absolute 14-day MAE).
+                    - FF  : RandomForest (per audit and empirical MAE).
+                    - Jsc : RandomForest (only family with GroupKFold signal).
+                    - Voc : RandomForest.
+
+               2. Persistence blend: the raw motor forecast is mixed with a
+                  "persistence" baseline (the parameter's value at the anchor
+                  day) using a per-parameter coefficient k_blend:
+
+                     Pred_final = (1 - k_blend) * Pred_motor + k_blend * Persistence
+
+                  When the motor carries no signal for a parameter (e.g. FF),
+                  the blend with a high k_blend collapses the forecast to the
+                  trivial "value stays constant" baseline, which is optimal.
+
+                  Per the trajectory audit (src/trajectory_xgb_audit.py):
+                    - Jsc: real, transferable signal -> low k_blend.
+                    - PCE, Voc: signal in-cell but not across cells -> moderate k.
+                    - FF: no signal -> high k.
+
+             The k_blend coefficients are calibrated empirically by
+             src/trajectory_calibration_optimizer.py, which writes a JSON file
+             at FILE_TRAJECTORY_COEFFS_CALIBRATED. At import time this module
+             loads that file if present, overriding the hardcoded baselines.
+
+             Forecast horizon policy (two horizons, not one):
+               - EVALUATION_HORIZON (14 d): window used to compute the MAE.
+                 Kept fixed so all cells share a comparable metric.
+               - SIMULATION_HORIZON (30 d): total days simulated for the
+                 dashboard. Days beyond EVALUATION_HORIZON are pure
+                 extrapolation: they are plotted but not scored.
+
+               Per-cell behavior:
+                 * Sensor weather (LOOCV): simulation is bounded by the cell's
+                   own sensor data, so SIMULATION_HORIZON is a ceiling that may
+                   never be reached.
+                 * API weather (production): simulation runs the full
+                   SIMULATION_HORIZON because Open-Meteo is unbounded.
+                 * Cells with fewer than MIN_FORECAST_HORIZON future days are
+                   discarded entirely. Cells with fewer than EVALUATION_HORIZON
+                   are flagged Forecast_Truncated=True and excluded from the
+                   aggregate MAE.
 """
 
+import json
 import logging
-from typing import Dict, List, Tuple, cast
+from typing import Any, Dict, List, Tuple, cast
 
 import joblib
 import numpy as np
 import pandas as pd
-import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
+from xgboost import XGBRegressor
 
 from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_SCREENING_ARTIFACTS,
     FILE_TRAJECTORY_MODELS,
     FILE_TRAJECTORY_LOOCV,
-    FILE_TRAJECTORY_PRODUCTION,   
+    FILE_TRAJECTORY_PRODUCTION,
+    FILE_TRAJECTORY_COEFFS_CALIBRATED,
+    DEFAULT_LAT,
+    DEFAULT_LON,
+    ROLLING_WINDOW,
+    ANCHOR_DAY,
+    EVALUATION_HORIZON,
+    SIMULATION_HORIZON,
+    FORECAST_HORIZON,     # alias of EVALUATION_HORIZON, kept for compatibility
+    RANDOM_STATE,
     XGB_PARAMS_RUL_PCE,
-    DEFAULT_LAT,                 
-    DEFAULT_LON,     
-    ROLLING_WINDOW,       
-    ANCHOR_DAY,            
-    FORECAST_HORIZON,    
-    TARGET_PARAMS                
 )
 
 logging.basicConfig(
@@ -41,7 +96,11 @@ logger = logging.getLogger("TrajectoryForecasting")
 # ==============================================================================
 # MODULE-LEVEL CONFIGURATION
 # ==============================================================================
-TARGET_PARAMS = ["PCE", "pFF", "Jsc", "Voc"]
+# Physical parameters to forecast. FF is the physical Fill Factor (from the
+# filtering stage, step 02), NOT the morphological pFF descriptor produced by
+# the clustering stage (step 03). Using pFF here would forecast a structural
+# descriptor rather than a physical quantity.
+TARGET_PARAMS = ["PCE", "FF", "Jsc", "Voc"]
 
 BASE_FEATURES = [
     "Daily_Irradiance_Dose",
@@ -50,6 +109,84 @@ BASE_FEATURES = [
     "Rolling_Irradiance",
     "Rolling_Thermal_load",
 ]
+
+# ------------------------------------------------------------------------------
+# Per-parameter model family selection.
+# Rationale (empirical, on the 14-day absolute MAE):
+#   - PCE : XGBoost beats RF.
+#   - FF  : RF beats XGBoost.
+#   - Jsc : RF beats XGBoost, and is the only family with cross-cell signal.
+#   - Voc : RF beats XGBoost.
+# ------------------------------------------------------------------------------
+MODEL_TYPE_PER_PARAM: Dict[str, str] = {
+    "PCE": "xgboost",
+    "FF":  "random_forest",
+    "Jsc": "random_forest",
+    "Voc": "random_forest",
+}
+
+# ------------------------------------------------------------------------------
+# Model hyperparameters.
+# ------------------------------------------------------------------------------
+RF_PARAMS: Dict[str, Any] = dict(
+    n_estimators=200,
+    max_depth=4,
+    min_samples_leaf=5,
+    random_state=RANDOM_STATE,
+    n_jobs=-1,
+)
+
+# ------------------------------------------------------------------------------
+# Forecast horizon policy.
+# ------------------------------------------------------------------------------
+# Hard floor: below this many future days, the MAE is dominated by noise and
+# the cell is discarded entirely. At or above this floor, the cell is
+# simulated over its available window and flagged as truncated.
+MIN_FORECAST_HORIZON = 3
+
+# ------------------------------------------------------------------------------
+# Persistence-blend coefficients (per parameter).
+# ------------------------------------------------------------------------------
+# k_blend = 0   -> pure motor
+# k_blend = 1   -> pure persistence (forecast stays at the anchor value)
+#
+# The values below are the immutable baseline. If the calibration optimizer
+# (src/trajectory_calibration_optimizer.py) has been run, its JSON payload
+# overrides them at import time.
+K_BLEND_HARDCODED: Dict[str, float] = {
+    "PCE": 0.0,
+    "FF": 0.0,
+    "Jsc": 0.0,
+    "Voc": 0.0,
+}
+
+
+def _load_k_blend_defaults() -> Dict[str, float]:
+    """
+    Load calibrated k_blend from JSON if present; else fall back to the
+    hardcoded baselines. The JSON is written by
+    src/trajectory_calibration_optimizer.py.
+    """
+    values = dict(K_BLEND_HARDCODED)
+    if FILE_TRAJECTORY_COEFFS_CALIBRATED.exists():
+        try:
+            with FILE_TRAJECTORY_COEFFS_CALIBRATED.open(encoding="utf-8") as f:
+                payload = json.load(f)
+            calibrated = payload.get("k_blend_per_param", {})
+            for p in values:
+                if p in calibrated:
+                    values[p] = float(calibrated[p])
+            logger.info(f"Calibrated k_blend loaded from JSON -> {values}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to read calibrated k_blend ({e}); using hardcoded values."
+            )
+    else:
+        logger.info(f"No calibrated k_blend found; using hardcoded -> {values}")
+    return values
+
+
+K_BLEND_DEFAULTS: Dict[str, float] = _load_k_blend_defaults()
 
 
 # ==============================================================================
@@ -127,12 +264,26 @@ def build_trajectory_matrix(df_healthy: pd.DataFrame) -> Tuple[pd.DataFrame, Lis
 def train_multivariate_engine(
     df_train: pd.DataFrame,
     targets: List[str],
-) -> Dict[str, xgb.XGBRegressor]:
-    """Train one independent XGBoost estimator per physical parameter."""
-    models = {}
+) -> Dict[str, Any]:
+    """
+    Train one independent regressor per physical parameter.
+
+    The model family is selected per parameter via MODEL_TYPE_PER_PARAM:
+      - "xgboost"       -> xgb.XGBRegressor(**XGB_PARAMS_RUL_PCE)
+      - "random_forest" -> RandomForestRegressor(**RF_PARAMS)
+
+    Returns a dict mapping parameter -> fitted model.
+    """
+    models: Dict[str, Any] = {}
     for param in targets:
         features = BASE_FEATURES + [f"{param}_Lag1"]
-        model = xgb.XGBRegressor(**XGB_PARAMS_RUL_PCE)
+        model_type = MODEL_TYPE_PER_PARAM.get(param, "random_forest")
+
+        if model_type == "xgboost":
+            model = XGBRegressor(**XGB_PARAMS_RUL_PCE)
+        else:
+            model = RandomForestRegressor(**RF_PARAMS)
+
         model.fit(df_train[features], df_train[f"{param}_Delta"])
         models[param] = model
     return models
@@ -142,14 +293,40 @@ def simulate_trajectory(
     initial_norm_states: Dict[str, float],
     initial_raw_values: Dict[str, float],
     future_weather: pd.DataFrame,
-    models: Dict[str, xgb.XGBRegressor],
+    models: Dict[str, Any],
     historical_weather: pd.DataFrame,
     targets: List[str],
+    k_blend_per_param: Dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """
     Iterate stepwise into the future, predicting normalized increments and
     updating each parameter's state autoregressively.
+
+    Args:
+        initial_norm_states: State at the anchor day, per parameter, in
+            normalized units (value / initial value).
+        initial_raw_values: Initial baseline values in physical units.
+        future_weather: Daily weather over the forecast horizon. Its length
+            defines how many days the simulation runs (may be shorter than
+            SIMULATION_HORIZON if the underlying data source is bounded).
+        models: One trained regressor per parameter.
+        historical_weather: History up to the anchor (for rolling features).
+        targets: Parameters to simulate.
+        k_blend_per_param: Optional dict mapping parameter -> persistence blend
+            weight. If None or missing a key, the value in K_BLEND_DEFAULTS
+            is used.
     """
+    k_blend = dict(K_BLEND_DEFAULTS)
+    if k_blend_per_param:
+        k_blend.update(k_blend_per_param)
+
+    # Persistence baseline: the parameter's value at the anchor day, in
+    # physical units. Constant across the forecast horizon. Represents the
+    # "value stays as observed" naive forecast.
+    persistence_value: Dict[str, float] = {
+        p: initial_raw_values[p] * initial_norm_states[p] for p in targets
+    }
+
     simulated_days = []
     current_states = initial_norm_states.copy()
 
@@ -186,11 +363,21 @@ def simulate_trajectory(
             new_norm_state = max(0.0, current_states[param] + pred_delta)
             current_states[param] = new_norm_state
 
-            daily_result[f"Pred_{param}"] = new_norm_state * initial_raw_values[param]
+            pred_motor = new_norm_state * initial_raw_values[param]
+
+            # Persistence blend (per parameter).
+            k = k_blend.get(param, 0.0)
+            if k > 0.0:
+                pred_final = (1.0 - k) * pred_motor + k * persistence_value[param]
+            else:
+                pred_final = pred_motor
+
+            daily_result[f"Pred_{param}"] = pred_final
 
         simulated_days.append(daily_result)
 
     return pd.DataFrame(simulated_days)
+
 
 def fetch_and_calibrate_api_weather(
     df_sensor_daily: pd.DataFrame,
@@ -208,7 +395,10 @@ def fetch_and_calibrate_api_weather(
 
     logger.info("Fetching and calibrating Open-Meteo API weather...")
     min_date = df_sensor_daily["Date_Day"].min()
-    max_date = df_sensor_daily["Date_Day"].max()
+    max_date = (
+        df_sensor_daily["Date_Day"].max()
+        + pd.Timedelta(days=SIMULATION_HORIZON)
+    )
 
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
@@ -264,6 +454,7 @@ def fetch_and_calibrate_api_weather(
 
     return df_api_daily
 
+
 # ==============================================================================
 # 3. ROBUST EVALUATION (LEAVE-ONE-CELL-OUT)
 # ==============================================================================
@@ -271,14 +462,25 @@ def run_loocv_evaluation(
     df_daily: pd.DataFrame,
     healthy_cohort: List[str],
     targets: List[str],
+    k_blend_per_param: Dict[str, float] | None = None,
 ) -> List[dict]:
     """
     Leave-One-Cell-Out evaluation: for each cell, train on the rest of the
     cohort and forecast its trajectory using sensor weather (ground truth).
+
+    Horizon policy:
+      * Simulation runs for min(SIMULATION_HORIZON, sensor_days_available).
+        Since sensor weather dies with the cell, the effective horizon is
+        bounded by the physical lifespan.
+      * MAE is computed on the first EVALUATION_HORIZON days only.
+      * Cells whose evaluation window is shorter than EVALUATION_HORIZON are
+        flagged Forecast_Truncated=True and excluded from the aggregate MAE.
+
     Returns the per-day simulated vs. actual records for dashboard plotting.
     """
     print("\n" + "=" * 85)
-    print(f" MULTIVARIATE EVALUATION: LEAVE-ONE-CELL-OUT ({FORECAST_HORIZON}-DAY FORECAST HORIZON)")
+    print(f" MULTIVARIATE EVALUATION: LEAVE-ONE-CELL-OUT "
+          f"(eval={EVALUATION_HORIZON}d, sim={SIMULATION_HORIZON}d)")
     print("=" * 85)
 
     all_metrics: List[dict] = []
@@ -294,19 +496,38 @@ def run_loocv_evaluation(
         blind_models = train_multivariate_engine(df_train, targets)
 
         hist_cutoff = df_test[df_test["Exposure_Days"] <= ANCHOR_DAY]
-        future_ground_truth = (
-            df_test[df_test["Exposure_Days"] > ANCHOR_DAY].head(FORECAST_HORIZON)
-        )
+        future_all = df_test[df_test["Exposure_Days"] > ANCHOR_DAY]
 
         if hist_cutoff.empty:
             logger.warning(f"[{test_cell}] No data before anchor day {ANCHOR_DAY}. Skipping.")
             continue
-        if len(future_ground_truth) < FORECAST_HORIZON:
+
+        n_available = len(future_all)
+        if n_available < MIN_FORECAST_HORIZON:
             logger.warning(
-                f"[{test_cell}] Only {len(future_ground_truth)} future days available "
-                f"(need {FORECAST_HORIZON}). Skipping."
+                f"[{test_cell}] Only {n_available} future days available "
+                f"(< {MIN_FORECAST_HORIZON}). Skipping."
             )
             continue
+
+        # Simulate as many days as we can: min(SIMULATION_HORIZON, sensor data).
+        n_simulate = min(SIMULATION_HORIZON, n_available)
+        future_ground_truth = future_all.head(n_simulate).copy()
+
+        # Evaluation window: always the first EVALUATION_HORIZON days.
+        n_evaluate = min(EVALUATION_HORIZON, n_simulate)
+        truncated = n_evaluate < EVALUATION_HORIZON
+
+        if truncated:
+            logger.info(
+                f"[{test_cell}] Evaluation window truncated to {n_evaluate} days "
+                f"(of {EVALUATION_HORIZON}). Excluded from aggregate MAE."
+            )
+        elif n_simulate > EVALUATION_HORIZON:
+            logger.info(
+                f"[{test_cell}] Extended simulation to {n_simulate} days "
+                f"(MAE evaluated on first {EVALUATION_HORIZON})."
+            )
 
         initial_norm_states = {
             p: float(hist_cutoff.iloc[-1][f"{p}_Smooth"]) for p in targets
@@ -323,9 +544,10 @@ def run_loocv_evaluation(
         df_sim = simulate_trajectory(
             initial_norm_states, initial_raw_values,
             future_weather, blind_models, hist_cutoff, targets,
+            k_blend_per_param=k_blend_per_param,
         )
 
-                # --- Calibration history (Actual only; Pred = NaN) ---
+        # --- Calibration history (Actual only; Pred = NaN) ---
         hist_actual = {
             p: (hist_cutoff[f"{p}_Smooth"] * hist_cutoff[f"{p}_Initial"]).to_numpy(dtype=float)
             for p in targets
@@ -339,6 +561,9 @@ def run_loocv_evaluation(
                 "Date_Day": hist_dates[i],
                 "Exposure_Days": float(hist_exposure[i]),
                 "Phase": "Calibration",
+                "Forecast_Horizon_Used": n_simulate,
+                "Evaluation_Horizon_Used": n_evaluate,
+                "Forecast_Truncated": truncated,
             }
             for param in targets:
                 record[f"Actual_{param}"] = float(hist_actual[param][i])
@@ -362,22 +587,47 @@ def run_loocv_evaluation(
                 "Date_Day": truth_dates[i],
                 "Exposure_Days": float(truth_exposure[i]),
                 "Phase": "Forecast",
+                "Forecast_Horizon_Used": n_simulate,
+                "Evaluation_Horizon_Used": n_evaluate,
+                "Forecast_Truncated": truncated,
             }
             for param in targets:
                 record[f"Actual_{param}"] = float(truth_actual[param][i])
                 record[f"Pred_{param}"] = float(pred_arrays[param][i])
             trajectory_records.append(record)
 
-        # --- MAE metrics per parameter ---
+        # --- MAE metrics per parameter (evaluated on first n_evaluate days) ---
         for param in targets:
-            mae = float(mean_absolute_error(truth_actual[param], pred_arrays[param]))
-            all_metrics.append({"Test_Cell": test_cell, "Parameter": param, "MAE": mae})
+            mae = float(mean_absolute_error(
+                truth_actual[param][:n_evaluate],
+                pred_arrays[param][:n_evaluate],
+            ))
+            all_metrics.append({
+                "Test_Cell": test_cell,
+                "Parameter": param,
+                "MAE": mae,
+                "Horizon_Used": n_evaluate,
+                "Truncated": truncated,
+            })
 
+    # --- Aggregate report (complete cells vs truncated cells) ---
     if all_metrics:
         df_metrics = pd.DataFrame(all_metrics)
-        res = df_metrics.groupby("Parameter")["MAE"].mean().reset_index()
-        print(f"\nMEAN ABSOLUTE ERROR (MAE) AT {FORECAST_HORIZON}-DAY HORIZON (PHYSICAL UNITS):")
-        print(res.to_string(index=False))
+        df_complete = df_metrics[~df_metrics["Truncated"]]
+        df_trunc = df_metrics[df_metrics["Truncated"]]
+
+        if not df_complete.empty:
+            res_full = df_complete.groupby("Parameter")["MAE"].mean().reset_index()
+            n_full = df_complete["Test_Cell"].nunique()
+            print(f"\nMEAN ABSOLUTE ERROR (MAE) @ {EVALUATION_HORIZON}-DAY HORIZON "
+                  f"— complete cells only (N={n_full}):")
+            print(res_full.to_string(index=False))
+
+        if not df_trunc.empty:
+            n_trunc = df_trunc["Test_Cell"].nunique()
+            print(f"\nTRUNCATED CELLS — excluded from the aggregate above (N={n_trunc}):")
+            print(df_trunc[["Test_Cell", "Parameter", "MAE", "Horizon_Used"]].to_string(index=False))
+
         print("=" * 85 + "\n")
     else:
         print("\n[WARNING] No cell had enough data to run the LOOCV.")
@@ -385,16 +635,26 @@ def run_loocv_evaluation(
 
     return trajectory_records
 
+
 def run_production_backtesting(
     df_daily: pd.DataFrame,
     healthy_cohort: List[str],
     targets: List[str],
-    production_models: Dict[str, xgb.XGBRegressor],
+    production_models: Dict[str, Any],
     api_weather: pd.DataFrame,
+    k_blend_per_param: Dict[str, float] | None = None,
 ) -> List[dict]:
     """
     Production-model backtest: uses the 100%-trained models with API-calibrated
     weather (instead of sensor weather) for the future window.
+
+    Horizon policy:
+      * Simulation runs for SIMULATION_HORIZON days (unbounded, because the
+        API can supply weather indefinitely).
+      * Sensor ground truth only exists for the days the cell lived. Beyond
+        that, `Actual_*` is left as NaN so the dashboard can distinguish
+        prediction from measured reality.
+      * MAE is computed on the first min(EVALUATION_HORIZON, sensor_days) days.
     """
     records: List[dict] = []
 
@@ -404,26 +664,65 @@ def run_production_backtesting(
             continue
 
         hist = cell_data[cell_data["Exposure_Days"] <= ANCHOR_DAY]
-        future_truth = cell_data[cell_data["Exposure_Days"] > ANCHOR_DAY].head(FORECAST_HORIZON)
-
-        if hist.empty or len(future_truth) < FORECAST_HORIZON:
-            logger.warning(f"[{cell}] Insufficient history/future for production backtest. Skipping.")
+        if hist.empty:
+            logger.warning(f"[{cell}] No history before anchor day. Skipping.")
             continue
 
-        # Take API weather for the same dates as the future window
-        future_dates = future_truth["Date_Day"].tolist()
-        api_slice = api_weather[api_weather["Date_Day"].isin(future_dates)].copy()
-        api_slice = api_slice.sort_values("Date_Day").head(FORECAST_HORIZON)
+        # Sensor ground truth: bounded by the cell's lifespan.
+        sensor_future = cell_data[cell_data["Exposure_Days"] > ANCHOR_DAY]
+        n_sensor_available = len(sensor_future)
 
-        if len(api_slice) < FORECAST_HORIZON:
+        # Evaluation window: first EVALUATION_HORIZON days of sensor truth.
+        n_evaluate = min(EVALUATION_HORIZON, n_sensor_available)
+        truncated = n_evaluate < EVALUATION_HORIZON
+
+        # Full sensor ground truth for the parquet's Actual_* column: extends
+        # up to SIMULATION_HORIZON or wherever the sensor stops, whichever
+        # comes first. This matches the LOOCV parquet's Actual coverage so
+        # both charts show the same physical reality.
+        n_actual_show = min(SIMULATION_HORIZON, n_sensor_available)
+        future_truth_full = sensor_future.head(n_actual_show).copy()
+
+        if n_evaluate == 0:
+            logger.warning(f"[{cell}] No sensor ground truth after anchor. MAE will be NaN.")
+        elif truncated:
+            logger.info(
+                f"[{cell}] Evaluation window truncated to {n_evaluate} days "
+                f"(of {EVALUATION_HORIZON})."
+            )
+
+        # API weather: unbounded, so we simulate SIMULATION_HORIZON days.
+        anchor_date = hist["Date_Day"].max()
+        anchor_day = float(hist["Exposure_Days"].max())
+
+        future_dates_api = pd.date_range(
+            anchor_date + pd.Timedelta(days=1),
+            periods=SIMULATION_HORIZON,
+            freq="D",
+        ).date.tolist()
+
+        api_slice = api_weather[api_weather["Date_Day"].isin(future_dates_api)].copy()
+        api_slice = api_slice.sort_values("Date_Day").head(SIMULATION_HORIZON)
+
+        if len(api_slice) < MIN_FORECAST_HORIZON:
             logger.warning(f"[{cell}] API weather missing days. Skipping production backtest.")
             continue
 
-        # Attach Exposure_Days (from sensors) to API weather
-        future_weather = api_slice.merge(
-            future_truth[["Date_Day", "Exposure_Days"]],
-            on="Date_Day", how="left",
-        )
+        # Attach Exposure_Days: real value where sensor exists, else anchor + offset.
+        exposure_map = dict(zip(sensor_future["Date_Day"], sensor_future["Exposure_Days"]))
+        api_slice = api_slice.copy()
+        api_slice["Exposure_Days"] = [
+            exposure_map.get(d, anchor_day + (d - anchor_date).days)
+            for d in api_slice["Date_Day"]
+        ]
+
+        future_weather = api_slice
+        n_simulate = len(future_weather)
+        if n_simulate > EVALUATION_HORIZON:
+            logger.info(
+                f"[{cell}] Extended production simulation to {n_simulate} days "
+                f"(MAE evaluated on first {n_evaluate})."
+            )
 
         initial_norm_states = {
             p: float(hist.iloc[-1][f"{p}_Smooth"]) for p in targets
@@ -435,9 +734,10 @@ def run_production_backtesting(
         df_sim = simulate_trajectory(
             initial_norm_states, initial_raw_values,
             future_weather, production_models, hist, targets,
+            k_blend_per_param=k_blend_per_param,
         )
 
-                # --- Calibration history (Actual only; Pred = NaN) ---
+        # --- Calibration history (Actual only; Pred = NaN) ---
         hist_actual = {
             p: (hist[f"{p}_Smooth"] * hist[f"{p}_Initial"]).to_numpy(dtype=float)
             for p in targets
@@ -451,34 +751,52 @@ def run_production_backtesting(
                 "Date_Day": hist_dates[i],
                 "Exposure_Days": float(hist_exposure[i]),
                 "Phase": "Calibration",
+                "Forecast_Horizon_Used": n_simulate,
+                "Evaluation_Horizon_Used": n_evaluate,
+                "Forecast_Truncated": truncated,
             }
             for param in targets:
                 record[f"Actual_{param}"] = float(hist_actual[param][i])
                 record[f"Pred_{param}"] = float("nan")
             records.append(record)
 
-        # --- Forecast window (Actual + Pred) ---
-        truth_actual = {
-            p: (future_truth[f"{p}_Smooth"] * future_truth[f"{p}_Initial"]).to_numpy(dtype=float)
+        # --- Forecast window: Pred for all n_simulate days, Actual for every
+        #     day the sensor actually covers (up to SIMULATION_HORIZON). The
+        #     MAE is still evaluated on the first n_evaluate days only. ---
+        truth_actual_full = {
+            p: (future_truth_full[f"{p}_Smooth"] * future_truth_full[f"{p}_Initial"]).to_numpy(dtype=float)
             for p in targets
         }
-        truth_exposure = future_truth["Exposure_Days"].to_numpy(dtype=float)
-        truth_dates = future_truth["Date_Day"].to_numpy()
         pred_arrays = {p: df_sim[f"Pred_{p}"].to_numpy(dtype=float) for p in targets}
+        sim_dates = df_sim["Date_Day"].to_numpy()
+        sim_exposure = df_sim["Exposure_Days"].to_numpy(dtype=float)
 
-        for i in range(len(df_sim)):
+        for i in range(n_simulate):
             record = {
                 "cell_name": cell,
-                "Date_Day": truth_dates[i],
-                "Exposure_Days": float(truth_exposure[i]),
+                "Date_Day": sim_dates[i],
+                "Exposure_Days": float(sim_exposure[i]),
                 "Phase": "Forecast",
+                "Forecast_Horizon_Used": n_simulate,
+                "Evaluation_Horizon_Used": n_evaluate,
+                "Forecast_Truncated": truncated,
             }
             for param in targets:
-                record[f"Actual_{param}"] = float(truth_actual[param][i])
+                # Actual_* is filled for every day the sensor covers, even
+                # beyond the evaluation window. This keeps Chart 2's Actual
+                # aligned with Chart 1's, and lets the dashboard shade only
+                # the truly unknown tail (past the last sensor observation).
+                actual = (
+                    float(truth_actual_full[param][i])
+                    if i < n_actual_show
+                    else float("nan")
+                )
+                record[f"Actual_{param}"] = actual
                 record[f"Pred_{param}"] = float(pred_arrays[param][i])
             records.append(record)
 
     return records
+
 
 # ==============================================================================
 # MAIN
@@ -492,6 +810,13 @@ def main() -> None:
 
         df_daily, available_targets = build_trajectory_matrix(df_healthy)
         logger.info(f"Target parameters detected for forecasting: {available_targets}")
+        logger.info(f"Model family per parameter: {MODEL_TYPE_PER_PARAM}")
+        logger.info(f"Persistence blend coefficients in use: {K_BLEND_DEFAULTS}")
+        logger.info(
+            f"Horizon policy: evaluation = {EVALUATION_HORIZON} d, "
+            f"simulation = {SIMULATION_HORIZON} d, "
+            f"hard floor = {MIN_FORECAST_HORIZON} d"
+        )
 
         # --- Phase 1: blind-model LOOCV trajectories ---
         loocv_records = run_loocv_evaluation(df_daily, healthy_cohort, available_targets)
@@ -513,19 +838,19 @@ def main() -> None:
         # --- Serialization ---
         FILE_TRAJECTORY_MODELS.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(production_models, FILE_TRAJECTORY_MODELS)
-        logger.info(f"Trajectory models serialized → {FILE_TRAJECTORY_MODELS}")
+        logger.info(f"Trajectory models serialized -> {FILE_TRAJECTORY_MODELS}")
 
         if loocv_records:
             FILE_TRAJECTORY_LOOCV.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(loocv_records).to_parquet(FILE_TRAJECTORY_LOOCV, index=False)
-            logger.info(f"LOOCV trajectories serialized → {FILE_TRAJECTORY_LOOCV}")
+            logger.info(f"LOOCV trajectories serialized -> {FILE_TRAJECTORY_LOOCV}")
         else:
             logger.warning("No LOOCV trajectories to serialize.")
 
         if production_records:
             FILE_TRAJECTORY_PRODUCTION.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(production_records).to_parquet(FILE_TRAJECTORY_PRODUCTION, index=False)
-            logger.info(f"Production trajectories serialized → {FILE_TRAJECTORY_PRODUCTION}")
+            logger.info(f"Production trajectories serialized -> {FILE_TRAJECTORY_PRODUCTION}")
         else:
             logger.warning("No production trajectories to serialize.")
 
