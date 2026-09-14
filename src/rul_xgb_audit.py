@@ -1,10 +1,18 @@
 """
 Module: src/rul_xgb_audit.py
 Description: Empirical audit of the isolated XGBoost component on the daily
-             damage-increment targets (PCE and pFF). Quantifies the real
-             contribution of Machine Learning against trivial baselines and
-             characterises residual structure, overfitting gap, and per-cell
-             systematic bias. Companion diagnostic to 08_mppt_rul_forecasting.py.
+             PCE damage-increment target. Quantifies the real contribution of
+             Machine Learning against trivial baselines and characterises
+             residual structure, overfitting gap, and per-cell systematic
+             bias. Companion diagnostic to 08_mppt_rul_forecasting.py.
+
+             Scope note: only the PCE damage increment is audited. That is the
+             sole increment-style target the pipeline actually consumes (module
+             08). pFF is used by module 07 as an absolute Digital Twin target
+             (different formulation, different model), and FF/Jsc/Voc are
+             forecast by module 09 with a different engine (normalized
+             increments). Auditing pFF's daily increment here would test a
+             formulation that no production module uses.
 
              The full audit report is automatically written to
              `outputs/diagnostics/xgb_audit_summary.txt` while still being
@@ -75,10 +83,6 @@ _rul_mod = importlib.import_module("src.08_mppt_rul_forecasting")
 FEATURES_RUL_PCE: list[str] = _rul_mod.FEATURES_RUL_PCE
 build_rul_matrix = _rul_mod.build_rul_matrix
 
-# The pFF target shares the same environmental covariate set as PCE; the module
-# does not export a separate symbol, so we alias it here.
-FEATURES_RUL_PFF: list[str] = list(FEATURES_RUL_PCE)
-
 
 # ------------------------------------------------------------------------------
 # Audit configuration
@@ -87,9 +91,6 @@ N_SPLITS = 5
 N_PERMUTATION_REPEATS = 20
 OVERFIT_GAP_RATIO = 0.30
 VERDICT_THRESHOLDS = {"weak": 3.0, "real": 10.0}
-
-# Default smoothing window applied to the pFF loss signal before differentiation.
-PFF_SMOOTHING_WINDOW = 7
 
 # Auto-export path for the human-readable audit report.
 AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "xgb_audit_summary.txt"
@@ -140,8 +141,8 @@ class TargetSpec:
     xgb_params: Mapping[str, float | int]
 
 
+# Only PCE is audited (see module docstring for the rationale).
 TARGETS = [
-    TargetSpec("pff", "Daily_Increment_pFF", list(FEATURES_RUL_PFF), XGB_PARAMS_RUL_PCE),
     TargetSpec("pce", "Daily_Damage_Increment", list(FEATURES_RUL_PCE), XGB_PARAMS_RUL_PCE),
 ]
 
@@ -152,9 +153,7 @@ TARGETS = [
 def load_daily_matrix() -> pd.DataFrame:
     """
     Load the action-window scored dataset, inject PCE_initial from the T80
-    ground truth when missing, and build the daily RUL feature matrix. If the
-    pFF target is not already present, derive it locally using a smoothed
-    cumulative-loss formulation.
+    ground truth when missing, and build the daily RUL feature matrix.
     """
     df_twin = pd.read_parquet(FILE_HEALTHY_COHORT)
     t80_metrics = pd.read_parquet(FILE_T80_TRUTH)
@@ -170,64 +169,7 @@ def load_daily_matrix() -> pd.DataFrame:
         )
 
     df_daily = build_rul_matrix(df_twin, healthy_cohort)
-
-    if "pFF" in df_twin.columns and "Daily_Increment_pFF" not in df_daily.columns:
-        df_daily = _augment_with_pff_target(df_daily, df_twin, healthy_cohort)
-
     return df_daily
-
-
-def _augment_with_pff_target(
-    df_daily: pd.DataFrame,
-    df_twin: pd.DataFrame,
-    healthy_cohort: list[str],
-) -> pd.DataFrame:
-    """
-    Derive the daily pFF increment from the raw pFF column and merge it into
-    the existing daily matrix. The target is defined as the first difference
-    of a smoothed, clipped cumulative loss signal.
-    """
-    df_pff = df_twin[df_twin["cell_name"].isin(healthy_cohort)].copy()
-    if "Datetime" not in df_pff.columns:
-        df_pff["Datetime"] = pd.to_datetime(df_pff["Timestamp"], utc=True)
-    df_pff["Date_Day"] = df_pff["Datetime"].dt.date
-
-    df_pff_daily = (
-        df_pff.groupby(["cell_name", "Date_Day"])
-        .agg(Daily_pFF=("pFF", "mean"))
-        .reset_index()
-        .sort_values(["cell_name", "Date_Day"])
-    )
-
-    # Initial pFF reference: median of the first week of exposure per cell.
-    df_pff_daily["pFF_Initial"] = df_pff_daily.groupby("cell_name")["Daily_pFF"].transform(
-        lambda s: s.head(7).median()
-    )
-
-    # Instantaneous loss and its smoothed version.
-    df_pff_daily["Instant_Loss_pFF"] = 1.0 - df_pff_daily["Daily_pFF"] / df_pff_daily["pFF_Initial"]
-    df_pff_daily["Smoothed_Loss_pFF"] = (
-        df_pff_daily.groupby("cell_name")["Instant_Loss_pFF"]
-        .rolling(PFF_SMOOTHING_WINDOW, min_periods=1)
-        .mean()
-        .reset_index(level=0, drop=True)
-    )
-
-    df_pff_daily["Cumulative_Damage_pFF"] = df_pff_daily["Smoothed_Loss_pFF"].clip(lower=0.0, upper=1.0)
-    df_pff_daily["Lag_Damage_pFF"] = (
-        df_pff_daily.groupby("cell_name")["Cumulative_Damage_pFF"].shift(1).fillna(0.0)
-    )
-
-    df_pff_daily["Daily_Increment_pFF"] = (
-        df_pff_daily["Cumulative_Damage_pFF"] - df_pff_daily["Lag_Damage_pFF"]
-    ).clip(lower=0.0)
-
-    return pd.merge(
-        df_daily,
-        df_pff_daily[["cell_name", "Date_Day", "Daily_Increment_pFF"]],
-        on=["cell_name", "Date_Day"],
-        how="left",
-    )
 
 
 # ------------------------------------------------------------------------------
@@ -397,13 +339,26 @@ def compute_residual_diagnostics(
 # Automatic verdict
 # ------------------------------------------------------------------------------
 def print_verdict(best_model: str, best_mae: float, baseline_mae: float) -> None:
+    """
+    Compute the automatic verdict for a target.
+
+    A trivial Dummy winning the MAE ranking is a red flag: it means no
+    non-trivial model found exploitable signal, and the apparent "improvement"
+    over the Dummy(mean) baseline is just the Dummy(median) exploiting a
+    skewed target. We surface that explicitly instead of declaring a false
+    positive.
+    """
     improvement_pct = 100 * (baseline_mae - best_mae) / baseline_mae
-    if improvement_pct < VERDICT_THRESHOLDS["weak"]:
+
+    if "Dummy" in best_model:
+        verdict = "SIN SEÑAL RELEVANTE (el mejor modelo es un Dummy)"
+    elif improvement_pct < VERDICT_THRESHOLDS["weak"]:
         verdict = "SIN SEÑAL RELEVANTE"
     elif improvement_pct < VERDICT_THRESHOLDS["real"]:
         verdict = "SEÑAL DÉBIL"
     else:
         verdict = "SEÑAL PREDICTIVA REAL"
+
     print(f"  Mejor modelo (KFold) : {best_model} (MAE={best_mae:.5f})")
     print(f"  Mejora vs baseline   : {improvement_pct:+.1f}%")
     print(f"  => {verdict}")

@@ -44,7 +44,8 @@ logger = logging.getLogger("PCE_Forecasting")
 # ==============================================================================
 # MODULE-LEVEL CONFIGURATION
 # ==============================================================================
-ROLLING_WINDOW = 7
+SMOOTHING_WINDOW = 1   # ventana de la mediana móvil (W=1 confirmado óptimo por sweep)
+ANCHOR_SPACING   = 7   # días entre anclas de backtesting
 SIMULATION_WINDOW = 14
 T80_DAMAGE_LIMIT = 1.0 - T80_FRACTION  # Universal 0.20
 MIN_VELOCITY = 1e-4
@@ -159,7 +160,11 @@ else:
 # ==============================================================================
 # 1. DATA PIPELINE (NATURAL FLUCTUATION, NO CUMMAX)
 # ==============================================================================
-def build_rul_matrix(df_twin: pd.DataFrame, healthy_cohort: List[str]) -> pd.DataFrame:
+def build_rul_matrix(
+    df_twin: pd.DataFrame,
+    healthy_cohort: List[str],
+    smoothing_window: int = SMOOTHING_WINDOW,
+) -> pd.DataFrame:
     """
     Build the daily RUL feature matrix from the raw digital twin.
 
@@ -194,11 +199,11 @@ def build_rul_matrix(df_twin: pd.DataFrame, healthy_cohort: List[str]) -> pd.Dat
     # 1. Instantaneous real loss relative to the initial PCE
     df_daily["Instant_Loss"] = 1.0 - df_daily["Daily_PCE"] / df_daily["PCE_Initial"]
 
-    # 2. Deep rolling median (7 days) to stabilise high-frequency noise
-    #    (anti-ratchet: does not accumulate noise as permanent damage).
+    # 2. Rolling median (W=1 = identity, no smoothing) to stabilise noise.
+    #    Anti-ratchet: does not accumulate noise as permanent damage.
     df_daily["Cumulative_Damage"] = (
         df_daily.groupby("cell_name")["Instant_Loss"]
-        .rolling(ROLLING_WINDOW, min_periods=1)
+        .rolling(smoothing_window, min_periods=1)
         .median()
         .reset_index(level=0, drop=True)
     )
@@ -214,13 +219,13 @@ def build_rul_matrix(df_twin: pd.DataFrame, healthy_cohort: List[str]) -> pd.Dat
 
     df_daily["Rolling_Irradiance"] = (
         df_daily.groupby("cell_name")["Daily_Irradiance_Dose"]
-        .rolling(ROLLING_WINDOW, min_periods=1)
+        .rolling(smoothing_window, min_periods=1)
         .median()
         .reset_index(level=0, drop=True)
     )
     df_daily["Rolling_Thermal_load"] = (
         df_daily.groupby("cell_name")["Daily_Max_Temp_C"]
-        .rolling(ROLLING_WINDOW, min_periods=1)
+        .rolling(smoothing_window, min_periods=1)
         .median()
         .reset_index(level=0, drop=True)
     )
@@ -238,9 +243,23 @@ def fetch_api_history(
     Download raw historical data from Open-Meteo for the deployment coordinates.
 
     Returns daily aggregated API variables. No calibration is applied here.
+
+    The requested range is padded (400 days back, SIMULATION_WINDOW+30 days
+    forward, clipped to today) so the resulting cache file can serve module 09
+    without a second live fetch. On success, the response is also persisted to
+    FILE_API_HISTORY_CACHE for downstream reuse.
     """
     logger.info("Fetching raw historical data from Open-Meteo API...")
-    min_date, max_date = df_sensor_daily["Date_Day"].min(), df_sensor_daily["Date_Day"].max()
+
+    raw_min = pd.Timestamp(df_sensor_daily["Date_Day"].min())
+    raw_max = pd.Timestamp(df_sensor_daily["Date_Day"].max())
+    today = pd.Timestamp.now("UTC")
+    min_date = (raw_min - pd.Timedelta(days=400)).date()
+    max_date = min(
+        (raw_max + pd.Timedelta(days=SIMULATION_WINDOW + 30)).date(),
+        today.date(),
+    )
+
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
         f"&start_date={min_date}&end_date={max_date}"
@@ -248,7 +267,16 @@ def fetch_api_history(
         f"&timezone=Europe%2FMadrid"
     )
     try:
-        data = requests.get(url, timeout=15).json()["hourly"]
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        if "hourly" not in payload:
+            raise RuntimeError(
+                f"Open-Meteo archive did not return hourly data. "
+                f"Response keys: {list(payload.keys())}. "
+                f"Requested range: {min_date} to {max_date}"
+            )
+        data = payload["hourly"]
         df_api = pd.DataFrame(
             {
                 "Timestamp": pd.to_datetime(data["time"]),
@@ -268,6 +296,28 @@ def fetch_api_history(
             .reset_index()
         )
         logger.info(f"API history fetched: {len(df_api_daily)} daily records.")
+
+        # Persist raw API history so downstream modules (e.g. 09) can reuse it
+        # without a second live fetch. Keyed by (min_date, max_date) so a
+        # later run with a wider range invalidates the cache automatically.
+        try:
+            import json
+            from src.config import FILE_API_HISTORY_CACHE
+
+            FILE_API_HISTORY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            df_api_daily.to_parquet(FILE_API_HISTORY_CACHE, index=False)
+            cache_meta = {
+                "min_date": str(min_date),
+                "max_date": str(max_date),
+                "fetched_at": pd.Timestamp.now("UTC").isoformat(),
+            }
+            (FILE_API_HISTORY_CACHE.with_suffix(".meta.json")).write_text(
+                json.dumps(cache_meta, indent=2)
+            )
+            logger.info(f"API history cached -> {FILE_API_HISTORY_CACHE}")
+        except Exception as exc:
+            logger.warning(f"Failed to cache API history: {exc}")
+
         return df_api_daily
     except Exception as exc:
         logger.warning(f"API fetch failed: {exc}")
@@ -379,7 +429,7 @@ def simulate_rul_kinematics(
         day_temp = row["Daily_Max_Temp_C"]
         rolling_irr.append(day_irr)
         rolling_temp.append(day_temp)
-        if len(rolling_irr) > ROLLING_WINDOW:
+        if len(rolling_irr) > SMOOTHING_WINDOW:
             rolling_irr.pop(0)
             rolling_temp.pop(0)
 
@@ -463,9 +513,8 @@ def run_dynamic_backtesting(
         if pd.notna(value):
             true_survival_days = float(value)
 
-
     max_days = cell_data["Exposure_Days"].max()
-    anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ROLLING_WINDOW))
+    anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ANCHOR_SPACING))
     if int(max_days) not in anchors:
         anchors.append(int(max_days))
 
@@ -501,8 +550,8 @@ def run_dynamic_backtesting(
         else:
             rul_val = simulate_rul_kinematics(
                 cum_damage,
-                list(hist_cutoff["Daily_Irradiance_Dose"].tail(ROLLING_WINDOW)),
-                list(hist_cutoff["Daily_Max_Temp_C"].tail(ROLLING_WINDOW)),
+                list(hist_cutoff["Daily_Irradiance_Dose"].tail(SMOOTHING_WINDOW)),
+                list(hist_cutoff["Daily_Max_Temp_C"].tail(SMOOTHING_WINDOW)),
                 future,
                 model_pce,
                 phi_0=phi_0, phi_1=phi_1, phi_2=phi_2, lambda_w=lambda_w,
@@ -585,8 +634,8 @@ def run_dynamic_backtesting(
                 future = apply_calibration(reg_temp_wf, reg_irr_wf, future_raw)
                 rul_val = simulate_rul_kinematics(
                     cum_damage,
-                    list(hist_cutoff["Daily_Irradiance_Dose"].tail(ROLLING_WINDOW)),
-                    list(hist_cutoff["Daily_Max_Temp_C"].tail(ROLLING_WINDOW)),
+                    list(hist_cutoff["Daily_Irradiance_Dose"].tail(SMOOTHING_WINDOW)),
+                    list(hist_cutoff["Daily_Max_Temp_C"].tail(SMOOTHING_WINDOW)),
                     future,
                     model_pce,
                     phi_0=phi_0, phi_1=phi_1, phi_2=phi_2, lambda_w=lambda_w,
@@ -672,7 +721,15 @@ def run_live_production_forecast(
         f"&timezone=Europe%2FMadrid&forecast_days={SIMULATION_WINDOW}"
     )
     try:
-        data = requests.get(url, timeout=10).json()["hourly"]
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        if "hourly" not in payload:
+            raise RuntimeError(
+                f"Open-Meteo forecast did not return hourly data. "
+                f"Response keys: {list(payload.keys())}"
+            )
+        data = payload["hourly"]
         df_api = pd.DataFrame(
             {
                 "Timestamp": pd.to_datetime(data["time"]),
@@ -722,8 +779,8 @@ def run_live_production_forecast(
             else:
                 rul_val = simulate_rul_kinematics(
                     cum_damage,
-                    list(cell_data["Daily_Irradiance_Dose"].tail(ROLLING_WINDOW)),
-                    list(cell_data["Daily_Max_Temp_C"].tail(ROLLING_WINDOW)),
+                    list(cell_data["Daily_Irradiance_Dose"].tail(SMOOTHING_WINDOW)),
+                    list(cell_data["Daily_Max_Temp_C"].tail(SMOOTHING_WINDOW)),
                     df_forecast,
                     model_pce,
                 )
@@ -811,19 +868,28 @@ def main() -> None:
         print("=" * 85)
         final_prod_model_pce = train_rul_engine(df_daily)
 
-        # Final calibration: full history, all cells
-        # (correct for production inference: there is no future to filter)
-        reg_temp_prod, reg_irr_prod = fit_calibration(
-            df_daily, df_api_raw, max_date=df_daily["Date_Day"].max()
-        )
+        # Production calibration + live forecast require the API history.
+        # If Open-Meteo was unreachable, skip both gracefully so the LOOCV
+        # sensor artifacts and the consolidated RUL targets are still saved.
+        if not df_api_raw.empty:
+            # Final calibration: full history, all cells
+            # (correct for production inference: there is no future to filter)
+            reg_temp_prod, reg_irr_prod = fit_calibration(
+                df_daily, df_api_raw, max_date=df_daily["Date_Day"].max()
+            )
 
-        run_live_production_forecast(
-            df_daily,
-            healthy_cohort,
-            final_prod_model_pce,
-            reg_temp_prod,
-            reg_irr_prod,
-        )
+            run_live_production_forecast(
+                df_daily,
+                healthy_cohort,
+                final_prod_model_pce,
+                reg_temp_prod,
+                reg_irr_prod,
+            )
+        else:
+            logger.warning(
+                "API history unavailable; skipping production calibration and "
+                "live forecast. LOOCV sensor artifacts will still be saved."
+            )
 
         # ----------------------------------------------------------------------
         # 3. Result persistence

@@ -15,10 +15,17 @@ Description: Empirical calibration of the six hardcoded coefficients of the
                4. Persist the winning coefficients to a JSON file that the 08
                   module loads automatically on its next run.
 
+             In addition, a dedicated sweep of the smoothing window W is
+             performed. Because W changes the daily feature matrix and the
+             trained model, its anchors are frozen (using the canonical W=7
+             matrix) so every candidate W is evaluated over exactly the same
+             set of (cell, anchor) pairs.
+
              Outputs:
                - outputs/diagnostics/rul_coeffs_sensitivity.parquet
                - outputs/diagnostics/rul_coeffs_search.parquet
                - outputs/diagnostics/rul_coeffs_calibrated.json
+               - outputs/diagnostics/rul_smoothing_window_sweep.parquet
                - outputs/diagnostics/rul_coeffs_optimization.txt (mirror of stdout)
 """
 
@@ -70,7 +77,8 @@ EPS_DEFAULT = rul.EPS_HARDCODED
 K_BLEND_DEFAULT = 0.0   # 0 = pure engine, 1 = pure clock
 T_REF_DEFAULT = 54.0    # median lifetime of the cohort (days)
 
-ROLLING_WINDOW = rul.ROLLING_WINDOW
+SMOOTHING_WINDOW = rul.SMOOTHING_WINDOW
+ANCHOR_SPACING   = rul.ANCHOR_SPACING
 SIMULATION_WINDOW = rul.SIMULATION_WINDOW
 T80_DAMAGE_LIMIT = rul.T80_DAMAGE_LIMIT
 
@@ -156,10 +164,16 @@ def precompute_units(
     t80_metrics: pd.DataFrame,
     healthy_cohort: List[str],
     blind_models_by_fold: Dict[str, xgb.XGBRegressor],
+    anchors_per_cell: Optional[Dict[str, List[float]]] = None,
 ) -> List[SimulationUnit]:
     """
     Pre-compute every (cell, anchor, mode) simulation unit. Everything that
     does NOT depend on the kinematic coefficients is computed once here.
+
+    If `anchors_per_cell` is provided, the anchors are taken verbatim from it
+    and the early-stop on `cum_damage >= T80_DAMAGE_LIMIT` is disabled. This
+    guarantees that every candidate W in the smoothing-window sweep is
+    evaluated over the same (cell, anchor) pairs.
     """
     units: List[SimulationUnit] = []
 
@@ -174,10 +188,15 @@ def precompute_units(
             else None
         )
 
-        max_days = cell_data["Exposure_Days"].max()
-        anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ROLLING_WINDOW))
-        if int(max_days) not in anchors:
-            anchors.append(int(max_days))
+        if anchors_per_cell is not None and cell in anchors_per_cell:
+            anchors = anchors_per_cell[cell]
+            fixed_anchors = True
+        else:
+            max_days = cell_data["Exposure_Days"].max()
+            anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ANCHOR_SPACING))
+            if int(max_days) not in anchors:
+                anchors.append(int(max_days))
+            fixed_anchors = False
 
         train_cells = [c for c in healthy_cohort if c != cell]
         model = blind_models_by_fold[cell]
@@ -189,11 +208,11 @@ def precompute_units(
             actual_day = float(hist_cutoff.iloc[-1]["Exposure_Days"])
             cum_damage = float(hist_cutoff.iloc[-1]["Cumulative_Damage"])
 
-            if cum_damage >= T80_DAMAGE_LIMIT:
+            if not fixed_anchors and cum_damage >= T80_DAMAGE_LIMIT:
                 break
 
-            rolling_irr = list(hist_cutoff["Daily_Irradiance_Dose"].tail(ROLLING_WINDOW))
-            rolling_temp = list(hist_cutoff["Daily_Max_Temp_C"].tail(ROLLING_WINDOW))
+            rolling_irr = list(hist_cutoff["Daily_Irradiance_Dose"].tail(SMOOTHING_WINDOW))
+            rolling_temp = list(hist_cutoff["Daily_Max_Temp_C"].tail(SMOOTHING_WINDOW))
 
             # --- Sensor mode unit ---
             future_sensor = cell_data[cell_data["Exposure_Days"] > anchor].head(SIMULATION_WINDOW)
@@ -235,6 +254,29 @@ def precompute_units(
                     ))
 
     return units
+
+
+def compute_reference_anchors(
+    df_daily: pd.DataFrame, healthy_cohort: List[str],
+) -> Dict[str, List[float]]:
+    """
+    Compute the reference anchor list per cell using the canonical W=7 daily
+    matrix. Used by the W sweep to guarantee that every candidate W is
+    evaluated over the same set of (cell, anchor) pairs.
+    """
+    anchors_by_cell: Dict[str, List[float]] = {}
+    for cell in healthy_cohort:
+        cell_data = df_daily[df_daily["cell_name"] == cell].sort_values("Exposure_Days")
+        if cell_data.empty:
+            continue
+        max_days = cell_data["Exposure_Days"].max()
+        anchors = [
+            float(d) for d in range(int(BURN_IN_DAYS), int(max_days) + 1, ANCHOR_SPACING)
+        ]
+        if float(int(max_days)) not in anchors:
+            anchors.append(float(int(max_days)))
+        anchors_by_cell[cell] = anchors
+    return anchors_by_cell
 
 
 # ==============================================================================
@@ -302,9 +344,21 @@ def evaluate_coefficients(
             return float("nan")
         return float(np.mean(np.abs(sub["RUL_Pred"] - sub["RUL_Real"])))
 
+    mae_s = _mae("Sensor")
+    mae_a = _mae("API")
+    # Combined objective: 50/50 weighting so the optimizer cannot
+    # sacrifice one regime (API/production) to improve the other (Sensor/LOOCV).
+    # If either mode is missing (e.g. API unreachable), the combined metric is
+    # undefined and we surface it as +inf so every such combination ranks last
+    # and the guard in persist_calibrated_coefficients refuses to write a JSON.
+    if np.isnan(mae_s) or np.isnan(mae_a):
+        mae_c = float("inf")
+    else:
+        mae_c = 0.5 * mae_s + 0.5 * mae_a
     return {
-        "mae_sensor": _mae("Sensor"),
-        "mae_api": _mae("API"),
+        "mae_sensor": mae_s,
+        "mae_api": mae_a,
+        "mae_combined": mae_c,
         "n": int(len(valid)),
     }
 
@@ -325,17 +379,26 @@ GRID_1D = {
     "t_ref":    [45.0, 50.0, 54.0, 58.0, 65.0],
 }
 
-
 # Phase 2: focused N-D grid search on the most impactful coefficients.
 # phi_1 and phi_2 are held at their defaults (see BASELINE_REGISTRY).
+# NOTE: This grid is tuned for W=1 (the optimal smoothing window) and for
+# the COMBINED 50/50 objective (sensor + api). The optimum region for the
+# combined metric (per the 1D sensitivity) is around the baseline, not
+# in the sensor-favoured corner:
+#   phi_0 ~ 0.0025, lambda_w ~ 1.0, mu ~ 0.3, k_blend ~ 0.1
 GRID_ND = {
-    "phi_0":    [0.0075, 0.0100, 0.0125],
-    "lambda_w": [0.5, 0.6, 0.7],
-    "mu":       [0.55, 0.60, 0.65, 0.70],
-    "eps":      [0.5, 1.0],
-    "k_blend":  [0.0, 0.1, 0.2, 0.3, 0.5],
+    "phi_0":    [0.0010, 0.0015, 0.0025],
+    "lambda_w": [0.5, 0.8, 1.0],
+    "mu":       [0.20, 0.30, 0.50],
+    "eps":      [0.0, 0.5, 1.0],
+    "k_blend":  [0.0, 0.1, 0.2],
     "t_ref":    [50.0, 54.0, 58.0],
 }
+
+# Dedicated sweep: the smoothing window is NOT a kinematic coefficient.
+# It requires rebuilding the daily matrix and retraining the XGBoost, so it
+# gets its own dedicated pass with anchors frozen across W.
+SMOOTHING_WINDOW_GRID = [1, 2, 3, 5, 7, 10, 14]
 
 
 # ==============================================================================
@@ -398,16 +461,16 @@ def run_phase_2_grid(units: List[SimulationUnit]) -> pd.DataFrame:
             kwargs[k] = v
         res = evaluate_coefficients(units, **kwargs)
         rows.append({**dict(zip(keys, combo)), **res})
-        if res["mae_sensor"] < best_so_far:
-            best_so_far = res["mae_sensor"]
+        if res["mae_combined"] < best_so_far:
+            best_so_far = res["mae_combined"]
         if i % 10 == 0 or i == len(combos):
             print(
                 f"  [{i:>4d}/{len(combos)}] best so far: "
-                f"MAE_sensor = {best_so_far:.3f}"
+                f"MAE_combined = {best_so_far:.3f}"
             )
 
-    df = pd.DataFrame(rows).sort_values("mae_sensor").reset_index(drop=True)
-    print("\n  Top 10 combinations by Sensor MAE:")
+    df = pd.DataFrame(rows).sort_values("mae_combined").reset_index(drop=True)
+    print("\n  Top 10 combinations by COMBINED MAE (50/50 sensor/api):")
     print(df.head(10).to_string(index=False))
     return df
 
@@ -431,11 +494,82 @@ def pretrain_blind_models(
 
 
 # ==============================================================================
+# Dedicated sweep — smoothing window (rebuilds the full pipeline per W)
+# ==============================================================================
+def sweep_smoothing_window(
+    df_twin: pd.DataFrame,
+    healthy_cohort: List[str],
+    t80_metrics: pd.DataFrame,
+    df_api_raw: pd.DataFrame,
+    window_grid: list = SMOOTHING_WINDOW_GRID,
+) -> pd.DataFrame:
+    """
+    For each candidate smoothing window W, rebuild the entire RUL pipeline
+    (daily matrix -> blind models -> simulation units) and evaluate the
+    baseline kinematic coefficients. Returns one row per W with the LOOCV
+    MAE on the same scale as the rest of the report.
+
+    The sweep is deliberately separated from the fast `evaluate_coefficients`
+    re-evaluation because W affects the feature matrix and the trained model,
+    not just the kinematic simulation.
+
+    Anchors are frozen across W: the reference anchor set is computed once
+    from the canonical W=7 daily matrix, and every candidate W is evaluated
+    over exactly those (cell, anchor) pairs. This eliminates the survival
+    bias of the earlier sweep, where W=1 produced 32 anchors vs 40 for W>=5.
+    """
+    print("\n" + "=" * 90)
+    print(" DEDICATED SWEEP: SMOOTHING WINDOW (rebuilds the whole pipeline per W)")
+    print("=" * 90)
+
+    # Fix the anchor set once, using the canonical W=7 daily matrix.
+    df_daily_ref = build_rul_matrix(
+        df_twin, healthy_cohort, smoothing_window=SMOOTHING_WINDOW,
+    )
+    anchors_by_cell = compute_reference_anchors(df_daily_ref, healthy_cohort)
+    print("  Reference anchors (fixed across W):")
+    for cell, anchors in anchors_by_cell.items():
+        print(f"    [{cell}] {len(anchors)} anchors")
+
+    rows = []
+    for w in window_grid:
+        df_daily_w = build_rul_matrix(df_twin, healthy_cohort, smoothing_window=w)
+        blind_models_w = pretrain_blind_models(df_daily_w, healthy_cohort)
+        units_w = precompute_units(
+            df_daily_w, df_api_raw, t80_metrics, healthy_cohort, blind_models_w,
+            anchors_per_cell=anchors_by_cell,
+        )
+
+        res = evaluate_coefficients(
+            units_w,
+            phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
+            phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
+            mu=MU_DEFAULT, eps=EPS_DEFAULT,
+        )
+        rows.append({
+            "smoothing_window": w,
+            "mae_sensor": res["mae_sensor"],
+            "mae_api": res["mae_api"],
+            "n": res["n"],
+        })
+        print(
+            f"  W = {w:>2d} | MAE_sensor = {res['mae_sensor']:6.3f} d | "
+            f"MAE_api = {res['mae_api']:6.3f} d | N = {res['n']}"
+        )
+
+    df = pd.DataFrame(rows).sort_values("mae_sensor").reset_index(drop=True)
+    best_w = int(df.iloc[0]["smoothing_window"])
+    print(f"\n  Best W by Sensor MAE: {best_w}")
+    print("=" * 90)
+    return df
+
+
+# ==============================================================================
 # Final summary
 # ==============================================================================
 def print_final_summary(best: pd.Series, baseline: Dict[str, float]) -> None:
     print("\n" + "=" * 90)
-    print(" BEST COMBINATION FOUND (by Sensor MAE)")
+    print(" BEST COMBINATION FOUND (by COMBINED MAE, 50/50 sensor/api)")
     print("=" * 90)
 
     print("  Swept coefficients:")
@@ -449,13 +583,16 @@ def print_final_summary(best: pd.Series, baseline: Dict[str, float]) -> None:
         if k not in GRID_ND:
             print(f"    {k:<10s} = {BASELINE_REGISTRY[k]:<10.4f}   (default)")
 
+    base_combined = 0.5 * baseline["mae_sensor"] + 0.5 * baseline["mae_api"]
     print("\n  Metrics:")
-    print(f"    MAE_sensor = {best['mae_sensor']:.3f}  (baseline {baseline['mae_sensor']:.3f})")
-    print(f"    MAE_api    = {best['mae_api']:.3f}  (baseline {baseline['mae_api']:.3f})")
+    print(f"    MAE_sensor   = {best['mae_sensor']:.3f}  (baseline {baseline['mae_sensor']:.3f})")
+    print(f"    MAE_api      = {best['mae_api']:.3f}  (baseline {baseline['mae_api']:.3f})")
+    if "mae_combined" in best.index:
+        print(f"    MAE_combined = {best['mae_combined']:.3f}  (baseline {base_combined:.3f})")
 
-    improvement = baseline["mae_sensor"] - float(best["mae_sensor"])
-    pct = 100.0 * improvement / baseline["mae_sensor"]
-    print(f"\n  Improvement (Sensor) = {improvement:+.3f} days ({pct:+.1f}%)")
+    improvement = base_combined - float(best["mae_combined"])
+    pct = 100.0 * improvement / base_combined
+    print(f"\n  Improvement (Combined 50/50) = {improvement:+.3f} days ({pct:+.1f}%)")
     print("=" * 90)
 
 
@@ -470,7 +607,40 @@ def persist_calibrated_coefficients(
     """
     Write the winning coefficients to a JSON file consumed by the 08 module.
     Includes a metadata block for traceability.
+
+    Guard: refuses to persist if the best combination does not beat the
+    hardcoded baseline on the COMBINED objective (50/50 sensor/api). This
+    prevents the optimizer from silently degrading production with a JSON
+    that improves one regime at the expense of the other.
     """
+    best_combined = float(best_row["mae_combined"])
+    base_combined = 0.5 * float(baseline["mae_sensor"]) + 0.5 * float(baseline["mae_api"])
+
+    # Hard guard 1: if the combined metric is not a finite number (e.g. the
+    # API was unreachable and mae_api came back as NaN), refuse to persist.
+    # This protects against transient network failures silently poisoning
+    # production with an unvalidated JSON.
+    if not np.isfinite(best_combined) or not np.isfinite(base_combined):
+        print(
+            f"\n  [GUARD] Combined MAE is not finite "
+            f"(best={best_combined}, baseline={base_combined}). "
+            f"Most likely the API fetch failed and there are no API units. "
+            f"Coefficients NOT persisted."
+        )
+        print("  The 08 module will keep using the hardcoded defaults.")
+        return
+
+    # Hard guard 2: refuse to persist a combination that does not strictly
+    # improve on the hardcoded baseline under the combined objective.
+    if best_combined >= base_combined:
+        print(
+            f"\n  [GUARD] Best combined MAE ({best_combined:.3f}) does NOT beat "
+            f"baseline combined ({base_combined:.3f}). "
+            f"Coefficients NOT persisted."
+        )
+        print("  The 08 module will keep using the hardcoded defaults.")
+        return
+
     import json
     from datetime import datetime
 
@@ -489,8 +659,11 @@ def persist_calibrated_coefficients(
             "grid_size": grid_size,
             "mae_sensor": float(best_row["mae_sensor"]),
             "mae_api": float(best_row["mae_api"]),
+            "mae_combined": float(best_row["mae_combined"]),
             "baseline_mae_sensor": float(baseline["mae_sensor"]),
             "baseline_mae_api": float(baseline["mae_api"]),
+            "baseline_mae_combined": base_combined,
+            "objective": "mae_combined_50_50",
             "n_observations": int(best_row["n"]),
         },
     }
@@ -522,6 +695,14 @@ def _run() -> None:
     df_daily = build_rul_matrix(df_twin, healthy_cohort)
     df_api_raw = fetch_api_history(df_daily)
 
+    # ---- Dedicated sweep of the smoothing window (anchors frozen across W) ----
+    df_window = sweep_smoothing_window(
+        df_twin, healthy_cohort, t80_metrics, df_api_raw,
+    )
+    WINDOW_SWEEP_PATH = DIAGNOSTICS_DIR / "rul_smoothing_window_sweep.parquet"
+    df_window.to_parquet(WINDOW_SWEEP_PATH, index=False)
+    print(f"\n  Smoothing-window sweep saved -> {WINDOW_SWEEP_PATH}")
+
     # ---- Pre-training ----
     blind_models = pretrain_blind_models(df_daily, healthy_cohort)
 
@@ -535,6 +716,16 @@ def _run() -> None:
     print(f"  Sensor units: {len(sensor_units)}")
     print(f"  API units   : {len(api_units)}")
     print(f"  Total       : {len(units)}")
+
+    if not api_units:
+        print(
+            "\n  [ABORT] No API simulation units were produced. "
+            "The Open-Meteo history fetch must have failed. "
+            "The combined objective cannot be evaluated without API data. "
+            "Retry when the API is reachable."
+        )
+        print("  No calibration performed; the 08 module will keep using hardcoded defaults.")
+        return
 
     # ---- Baseline ----
     baseline = evaluate_coefficients(

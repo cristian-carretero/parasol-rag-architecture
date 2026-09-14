@@ -41,8 +41,8 @@
     M83AB302        : 30.823 d
 ==========================================================================================
 
-  Reference: calibrated RUL engine (v3) sensor MAE = 6.28 d
-  → Temporal baseline is 3.02 d WORSE than the engine
+  Reference: calibrated RUL engine (W=1) sensor MAE = 2.63 d
+  → Temporal baseline is 6.67 d WORSE than the engine
 ==========================================================================================
 
   Results table saved -> outputs/diagnostics/rul_temporal_baseline.parquet

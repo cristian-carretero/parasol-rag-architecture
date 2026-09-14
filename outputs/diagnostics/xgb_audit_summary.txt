@@ -1,130 +1,65 @@
 ==========================================================================================
- TARGET: Daily_Increment_pFF (PFF)
-==========================================================================================
-
---- 1. Estadística descriptiva del target ---
-n_samples       163.000000
-mean              0.001548
-median            0.000000
-std               0.007506
-min               0.000000
-max               0.079280
-skew              8.759011
-pct_zero         69.938650
-pct_negative      0.000000
-
---- 2. Baseline vs modelos: KFold(shuffle) vs GroupKFold(cell_name) ---
-  [     KFold] Dummy(median)                MAE=0.00154±0.00108  RMSE=0.00571  MedAE=-0.00000  R2=-0.1562  ΔMAE_vs_baseline=+0.00077
-  [     KFold] XGBoost(reg_lambda=100)      MAE=0.00231±0.00080  RMSE=0.00575  MedAE=0.00155  R2=-0.4406  ΔMAE_vs_baseline=+0.00000
-  [     KFold] Dummy(mean)                  MAE=0.00231±0.00080  RMSE=0.00575  MedAE=0.00155  R2=-0.4406  ΔMAE_vs_baseline=+0.00000
-  [     KFold] XGBoost(producción)          MAE=0.00239±0.00116  RMSE=0.00669  MedAE=0.00071  R2=-8.7943  ΔMAE_vs_baseline=-0.00008
-  [     KFold] Ridge(alpha=100.0)           MAE=0.00245±0.00067  RMSE=0.00604  MedAE=0.00143  R2=-1.3546  ΔMAE_vs_baseline=-0.00013
-  [     KFold] RandomForest(200,md4)        MAE=0.00255±0.00056  RMSE=0.00631  MedAE=0.00105  R2=-2.8879  ΔMAE_vs_baseline=-0.00024
-  [     KFold] Ridge(alpha=10.0)            MAE=0.00291±0.00042  RMSE=0.00655  MedAE=0.00160  R2=-3.1925  ΔMAE_vs_baseline=-0.00060
-  [     KFold] Ridge(alpha=1.0)             MAE=0.00305±0.00038  RMSE=0.00670  MedAE=0.00173  R2=-3.7991  ΔMAE_vs_baseline=-0.00074
-  [     KFold] Ridge(alpha=0.1)             MAE=0.00307±0.00038  RMSE=0.00672  MedAE=0.00175  R2=-3.8745  ΔMAE_vs_baseline=-0.00076
-  (GroupKFold omitido: solo 4 celdas únicas, se necesitan al menos 5 para 5-fold)
-
---- 3. Importancia de variables (Pearson / ganancia XGBoost / permutación) ---
-                        pearson_corr  xgb_gain  permutation_importance
-Rolling_Irradiance         -0.137886  0.176805                0.000823
-Daily_Irradiance_Dose      -0.094357  0.219918                0.000699
-Cumulative_Damage_Lag1     -0.112611  0.141295                0.000512
-Rolling_Thermal_load       -0.150862  0.272370                0.000510
-Daily_Median_Humidity      -0.080049  0.065497                0.000202
-Daily_Max_Temp_C           -0.129240  0.124115                0.000194
-
---- 4. Overfitting gap (XGBoost producción) ---
-  MAE train completo : 0.00080
-  MAE CV (KFold)     : 0.00239
-  Gap (CV - train)   : +0.00159 (posible sobreajuste)
-
---- 5. Residuos fuera de muestra (cross_val_predict) ---
-  Sesgo global (media residuo) : +0.000058
-  Std residuo                  : 0.008029
-
-  Correlación residuo-feature:
-Rolling_Thermal_load     -0.106265
-Daily_Max_Temp_C         -0.081812
-Cumulative_Damage_Lag1   -0.077304
-Daily_Median_Humidity    -0.051912
-Rolling_Irradiance        0.016367
-Daily_Irradiance_Dose    -0.007537
-
-  Sesgo medio del residuo por celda (out-of-fold):
-cell_name
-M83AB302     -0.001464
-A167AB344a   -0.000039
-ASLRXAB341   -0.000008
-A164AB302c    0.001626
-
---- 6. Veredicto automático ---
-  Mejor modelo (KFold) : Dummy(median) (MAE=0.00154)
-  Mejora vs baseline   : +33.5%
-  => SEÑAL PREDICTIVA REAL
-
-==========================================================================================
  TARGET: Daily_Damage_Increment (PCE)
 ==========================================================================================
 
 --- 1. Estadística descriptiva del target ---
 n_samples       163.000000
-mean              0.004487
-median            0.000000
-std               0.042887
-min              -0.173686
-max               0.347373
-skew              2.836318
-pct_zero         36.809816
-pct_negative     29.447853
+mean              0.008628
+median           -0.002283
+std               0.121544
+min              -0.347373
+max               0.692100
+skew              1.203482
+pct_zero          0.613497
+pct_negative     52.760736
 
 --- 2. Baseline vs modelos: KFold(shuffle) vs GroupKFold(cell_name) ---
-  [     KFold] Dummy(median)                MAE=0.01800±0.00799  RMSE=0.03711  MedAE=0.00524  R2=-0.0303  ΔMAE_vs_baseline=+0.00164
-  [     KFold] XGBoost(producción)          MAE=0.01856±0.00840  RMSE=0.03543  MedAE=0.00664  R2=+0.0983  ΔMAE_vs_baseline=+0.00108
-  [     KFold] RandomForest(200,md4)        MAE=0.01960±0.00620  RMSE=0.03500  MedAE=0.00863  R2=+0.0369  ΔMAE_vs_baseline=+0.00003
-  [     KFold] Dummy(mean)                  MAE=0.01964±0.00827  RMSE=0.03676  MedAE=0.00573  R2=-0.0008  ΔMAE_vs_baseline=+0.00000
-  [     KFold] XGBoost(reg_lambda=100)      MAE=0.01964±0.00827  RMSE=0.03676  MedAE=0.00574  R2=-0.0008  ΔMAE_vs_baseline=-0.00000
-  [     KFold] Ridge(alpha=100.0)           MAE=0.01984±0.00596  RMSE=0.03464  MedAE=0.01044  R2=+0.0357  ΔMAE_vs_baseline=-0.00020
-  [     KFold] Ridge(alpha=10.0)            MAE=0.02267±0.00525  RMSE=0.03602  MedAE=0.01531  R2=-0.2193  ΔMAE_vs_baseline=-0.00303
-  [     KFold] Ridge(alpha=1.0)             MAE=0.02335±0.00523  RMSE=0.03655  MedAE=0.01591  R2=-0.3034  ΔMAE_vs_baseline=-0.00372
-  [     KFold] Ridge(alpha=0.1)             MAE=0.02343±0.00523  RMSE=0.03662  MedAE=0.01588  R2=-0.3139  ΔMAE_vs_baseline=-0.00380
+  [     KFold] RandomForest(200,md4)        MAE=0.05793±0.00618  RMSE=0.08366  MedAE=0.03759  R2=+0.4346  ΔMAE_vs_baseline=+0.01727
+  [     KFold] XGBoost(producción)          MAE=0.05807±0.00688  RMSE=0.08543  MedAE=0.03901  R2=+0.4344  ΔMAE_vs_baseline=+0.01713
+  [     KFold] Ridge(alpha=100.0)           MAE=0.06421±0.01105  RMSE=0.09340  MedAE=0.04425  R2=+0.3653  ΔMAE_vs_baseline=+0.01099
+  [     KFold] XGBoost(reg_lambda=100)      MAE=0.06520±0.01210  RMSE=0.10162  MedAE=0.03773  R2=+0.2512  ΔMAE_vs_baseline=+0.01001
+  [     KFold] Ridge(alpha=10.0)            MAE=0.06576±0.01001  RMSE=0.08790  MedAE=0.05071  R2=+0.4256  ΔMAE_vs_baseline=+0.00944
+  [     KFold] Ridge(alpha=1.0)             MAE=0.06622±0.01022  RMSE=0.08793  MedAE=0.05378  R2=+0.4228  ΔMAE_vs_baseline=+0.00898
+  [     KFold] Ridge(alpha=0.1)             MAE=0.06629±0.01025  RMSE=0.08796  MedAE=0.05413  R2=+0.4222  ΔMAE_vs_baseline=+0.00891
+  [     KFold] Dummy(median)                MAE=0.07381±0.01460  RMSE=0.11903  MedAE=0.03659  R2=-0.0285  ΔMAE_vs_baseline=+0.00139
+  [     KFold] Dummy(mean)                  MAE=0.07520±0.01425  RMSE=0.11914  MedAE=0.04215  R2=-0.0325  ΔMAE_vs_baseline=+0.00000
   (GroupKFold omitido: solo 4 celdas únicas, se necesitan al menos 5 para 5-fold)
 
 --- 3. Importancia de variables (Pearson / ganancia XGBoost / permutación) ---
                         pearson_corr  xgb_gain  permutation_importance
-Rolling_Irradiance         -0.353709  0.355663                0.002123
-Cumulative_Damage_Lag1     -0.282621  0.219077                0.001524
-Daily_Irradiance_Dose      -0.368258  0.232339                0.001213
-Rolling_Thermal_load        0.168402  0.108346                0.000466
-Daily_Max_Temp_C            0.015813  0.033109                0.000127
-Daily_Median_Humidity       0.136876  0.051466                0.000048
+Cumulative_Damage_Lag1     -0.524993  0.327693                0.028095
+Daily_Irradiance_Dose      -0.379977  0.247948                0.018303
+Rolling_Irradiance         -0.379977  0.280058                0.005422
+Daily_Median_Humidity       0.162244  0.050634                0.002354
+Daily_Max_Temp_C            0.121719  0.053556                0.002031
+Rolling_Thermal_load        0.121719  0.040110                0.000394
 
 --- 4. Overfitting gap (XGBoost producción) ---
-  MAE train completo : 0.01626
-  MAE CV (KFold)     : 0.01856
-  Gap (CV - train)   : +0.00230 (gap razonable)
+  MAE train completo : 0.04368
+  MAE CV (KFold)     : 0.05807
+  Gap (CV - train)   : +0.01439 (gap razonable)
 
 --- 5. Residuos fuera de muestra (cross_val_predict) ---
-  Sesgo global (media residuo) : -0.000043
-  Std residuo                  : 0.041741
+  Sesgo global (media residuo) : -0.001581
+  Std residuo                  : 0.086971
 
   Correlación residuo-feature:
-Rolling_Irradiance       -0.297068
-Daily_Irradiance_Dose    -0.282427
-Cumulative_Damage_Lag1   -0.253934
-Rolling_Thermal_load      0.134463
-Daily_Median_Humidity     0.108458
-Daily_Max_Temp_C          0.019827
+Cumulative_Damage_Lag1   -0.257760
+Daily_Irradiance_Dose    -0.111300
+Rolling_Irradiance       -0.111300
+Daily_Median_Humidity     0.082626
+Daily_Max_Temp_C          0.079425
+Rolling_Thermal_load      0.079425
 
   Sesgo medio del residuo por celda (out-of-fold):
 cell_name
-ASLRXAB341   -0.001156
-A167AB344a   -0.001104
-M83AB302     -0.000295
-A164AB302c    0.004285
+ASLRXAB341   -0.021085
+A167AB344a   -0.011867
+M83AB302      0.023379
+A164AB302c    0.034261
 
 --- 6. Veredicto automático ---
-  Mejor modelo (KFold) : Dummy(median) (MAE=0.01800)
-  Mejora vs baseline   : +8.3%
-  => SEÑAL DÉBIL
+  Mejor modelo (KFold) : RandomForest(200,md4) (MAE=0.05793)
+  Mejora vs baseline   : +23.0%
+  => SEÑAL PREDICTIVA REAL
 

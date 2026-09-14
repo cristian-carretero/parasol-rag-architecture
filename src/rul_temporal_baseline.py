@@ -42,7 +42,7 @@ from src.config import (
 # ------------------------------------------------------------------------------
 rul = importlib.import_module("src.08_mppt_rul_forecasting")
 build_rul_matrix = rul.build_rul_matrix
-ROLLING_WINDOW = rul.ROLLING_WINDOW
+ANCHOR_SPACING = rul.ANCHOR_SPACING
 
 
 # ==============================================================================
@@ -97,7 +97,7 @@ def build_anchor_table(
     the production engine sees them during backtesting, but WITHOUT training
     XGBoost or running any simulation.
 
-    Anchors are spaced ROLLING_WINDOW days apart, starting at BURN_IN_DAYS.
+    Anchors are spaced ANCHOR_SPACING days apart, starting at BURN_IN_DAYS.
     The final anchor is always the last observed exposure day for the cell.
     """
     rows = []
@@ -113,7 +113,7 @@ def build_anchor_table(
         )
 
         max_days = cell_data["Exposure_Days"].max()
-        anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ROLLING_WINDOW))
+        anchors = list(range(int(BURN_IN_DAYS), int(max_days) + 1, ANCHOR_SPACING))
         if int(max_days) not in anchors:
             anchors.append(int(max_days))
 
@@ -187,8 +187,8 @@ def evaluate_temporal_baseline(
     print("=" * 90)
 
     # Comparison against the calibrated engine
-    print("\n  Reference: calibrated RUL engine (v3) sensor MAE = 6.28 d")
-    delta = best["mae_global"] - 6.28
+    print("\n  Reference: calibrated RUL engine (W=1) sensor MAE = 2.63 d")
+    delta = best["mae_global"] - 2.63
     if delta < 0:
         print(f"  → Temporal baseline BEATS the engine by {-delta:.2f} d  (⚠ engine underperforms a clock)")
     else:

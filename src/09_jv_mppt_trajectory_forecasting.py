@@ -389,46 +389,144 @@ def fetch_and_calibrate_api_weather(
     readings (linear regression per variable). Returns a per-day DataFrame with
     Daily_Irradiance_Dose, Daily_Max_Temp_C, Daily_Median_Humidity already in
     sensor-equivalent units.
+
+    Strategy:
+      1. Try the on-disk cache written by module 08 (FILE_API_HISTORY_CACHE).
+         Reuse it only if its stored (min_date, max_date) covers the range we
+         need AND it is at most 24 h old.
+      2. Otherwise, hit the live archive endpoint. The end date is clipped to
+         today (the archive rejects future dates). On success, write the
+         cache so future runs don't need the network.
     """
+    import json
+    import time
+    from pathlib import Path
+
     import requests
     from sklearn.linear_model import LinearRegression
 
+    from src.config import FILE_API_HISTORY_CACHE
+
     logger.info("Fetching and calibrating Open-Meteo API weather...")
-    min_date = df_sensor_daily["Date_Day"].min()
-    max_date = (
-        df_sensor_daily["Date_Day"].max()
+
+    min_date_needed = pd.Timestamp(df_sensor_daily["Date_Day"].min()).date()
+    today = pd.Timestamp.now("UTC").date()
+    requested_max = (
+        pd.Timestamp(df_sensor_daily["Date_Day"].max())
         + pd.Timedelta(days=SIMULATION_HORIZON)
-    )
+    ).date()
+    max_date_needed = min(requested_max, today)
 
-    url = (
-        f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
-        f"&start_date={min_date}&end_date={max_date}"
-        f"&hourly=temperature_2m,relative_humidity_2m,shortwave_radiation"
-        f"&timezone=Europe%2FMadrid"
-    )
+    df_api_daily: pd.DataFrame | None = None
 
-    data = requests.get(url, timeout=20).json()["hourly"]
-    df_api = pd.DataFrame({
-        "Timestamp": pd.to_datetime(data["time"]),
-        "API_Temp_C": data["temperature_2m"],
-        "RH_pct": data["relative_humidity_2m"],
-        "API_GHI_W_m2": data["shortwave_radiation"],
-    })
-    df_api["Date_Day"] = df_api["Timestamp"].dt.date
+    # ---- 1. Cache lookup -----------------------------------------------------
+    cache_meta_path = Path(FILE_API_HISTORY_CACHE).with_suffix(".meta.json")
+    if FILE_API_HISTORY_CACHE.exists() and cache_meta_path.exists():
+        try:
+            meta = json.loads(cache_meta_path.read_text())
+            cache_min = pd.Timestamp(meta["min_date"]).date()
+            cache_max = pd.Timestamp(meta["max_date"]).date()
+            cache_age_h = (
+                pd.Timestamp.now("UTC") - pd.Timestamp(meta["fetched_at"])
+            ).total_seconds() / 3600.0
+            covers_range = cache_min <= min_date_needed and cache_max >= max_date_needed
+            if covers_range and cache_age_h < 24.0:
+                df_api_daily = pd.read_parquet(FILE_API_HISTORY_CACHE)
+                logger.info(
+                    f"Reusing cached API history from {cache_meta_path.name} "
+                    f"(age {cache_age_h:.1f} h, covers {cache_min}..{cache_max})"
+                )
+            else:
+                logger.info(
+                    f"API cache stale or insufficient: age={cache_age_h:.1f} h, "
+                    f"cache range {cache_min}..{cache_max}, "
+                    f"needed {min_date_needed}..{max_date_needed}"
+                )
+        except Exception as exc:
+            logger.warning(f"Failed to read API cache ({exc}); will fetch live.")
 
-    df_api_daily = df_api.groupby("Date_Day").agg(
-        API_Daily_Max_Temp=("API_Temp_C", "max"),
-        API_Daily_Irr_Dose=("API_GHI_W_m2", "sum"),
-        Daily_Mean_RH=("RH_pct", "mean"),
-    ).reset_index()
+    # ---- 2. Live fetch if no usable cache ------------------------------------
+    if df_api_daily is None:
+        url = (
+            f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
+            f"&start_date={min_date_needed}&end_date={max_date_needed}"
+            f"&hourly=temperature_2m,relative_humidity_2m,shortwave_radiation"
+            f"&timezone=Europe%2FMadrid"
+        )
 
-    # Calibrate against sensors using overlapping days
+        last_exc: Exception | None = None
+        payload = None
+        for attempt in (1, 2, 3):
+            try:
+                resp = requests.get(url, timeout=90)
+                # Some Open-Meteo 5xx responses are served with a 200 status and
+                # an empty body. Reject those explicitly instead of letting
+                # resp.json() raise an opaque "Expecting value" error.
+                if not resp.content or not resp.content.strip():
+                    raise RuntimeError(
+                        f"Open-Meteo returned an empty body "
+                        f"(status={resp.status_code}, len=0)"
+                    )
+                resp.raise_for_status()
+                payload = resp.json()
+                break
+            except Exception as exc:
+                last_exc = exc
+                wait = 5 * attempt
+                logger.warning(
+                    f"Open-Meteo request failed (attempt {attempt}/3): {exc}. "
+                    f"Retrying in {wait} s..."
+                )
+                if attempt < 3:
+                    time.sleep(wait)
+
+        if payload is None:
+            raise RuntimeError(
+                f"Open-Meteo request failed after 3 attempts: {last_exc}"
+            )
+
+        if "hourly" not in payload:
+            raise RuntimeError(
+                f"Open-Meteo archive did not return hourly data. "
+                f"Keys: {list(payload.keys())}, "
+                f"range: {min_date_needed} to {max_date_needed}"
+            )
+        data = payload["hourly"]
+
+        df_api = pd.DataFrame({
+            "Timestamp": pd.to_datetime(data["time"]),
+            "API_Temp_C": data["temperature_2m"],
+            "RH_pct": data["relative_humidity_2m"],
+            "API_GHI_W_m2": data["shortwave_radiation"],
+        })
+        df_api["Date_Day"] = df_api["Timestamp"].dt.date
+
+        df_api_daily = df_api.groupby("Date_Day").agg(
+            API_Daily_Max_Temp=("API_Temp_C", "max"),
+            API_Daily_Irr_Dose=("API_GHI_W_m2", "sum"),
+            Daily_Mean_RH=("RH_pct", "mean"),
+        ).reset_index()
+
+        # Write the cache so subsequent runs (or other modules) don't need the network.
+        try:
+            from src.config import FILE_API_HISTORY_CACHE as _CACHE
+            _CACHE.parent.mkdir(parents=True, exist_ok=True)
+            df_api_daily.to_parquet(_CACHE, index=False)
+            cache_meta_path.write_text(json.dumps({
+                "min_date": str(min_date_needed),
+                "max_date": str(max_date_needed),
+                "fetched_at": pd.Timestamp.now("UTC").isoformat(),
+            }, indent=2))
+            logger.info(f"API history cached -> {_CACHE}")
+        except Exception as exc:
+            logger.warning(f"Failed to cache API history: {exc}")
+
+    # ---- 3. Calibration against sensor overlap -------------------------------
     sensor_daily = df_sensor_daily[[
         "Date_Day", "Daily_Max_Temp_C", "Daily_Irradiance_Dose"
     ]].drop_duplicates()
 
     merged = pd.merge(sensor_daily, df_api_daily, on="Date_Day", how="inner").dropna()
-
     if merged.empty:
         raise RuntimeError("No overlapping days between sensors and API for calibration.")
 
@@ -439,10 +537,10 @@ def fetch_and_calibrate_api_weather(
         merged[["API_Daily_Irr_Dose"]], merged["Daily_Irradiance_Dose"]
     )
 
+    df_api_daily = df_api_daily.copy()
     df_api_daily["Daily_Max_Temp_C"] = reg_temp.predict(df_api_daily[["API_Daily_Max_Temp"]])
     df_api_daily["Daily_Irradiance_Dose"] = reg_irr.predict(df_api_daily[["API_Daily_Irr_Dose"]])
 
-    # Absolute humidity via Magnus-Tetens
     p_sat = 6.112 * np.exp(
         (17.67 * df_api_daily["Daily_Max_Temp_C"]) /
         (df_api_daily["Daily_Max_Temp_C"] + 243.5)
@@ -831,8 +929,18 @@ def main() -> None:
             production_records = run_production_backtesting(
                 df_daily, healthy_cohort, available_targets, production_models, api_weather,
             )
+            if not production_records:
+                logger.warning(
+                    "Production backtest produced 0 records. "
+                    "This usually means Open-Meteo did not cover the anchor+horizon window "
+                    "(e.g. the anchor is too close to today)."
+                )
         except Exception as e:
             logger.warning(f"Production backtest skipped: {e}")
+            logger.warning(
+                "  LOOCV artifacts are still valid and will be serialized. "
+                "Re-run when Open-Meteo is reachable."
+            )
             production_records = []
 
         # --- Serialization ---

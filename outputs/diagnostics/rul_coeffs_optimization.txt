@@ -1,5 +1,82 @@
 
 ==========================================================================================
+ DEDICATED SWEEP: SMOOTHING WINDOW (rebuilds the whole pipeline per W)
+==========================================================================================
+  Reference anchors (fixed across W):
+    [A164AB302c] 3 anchors
+    [A167AB344a] 7 anchors
+    [ASLRXAB341] 7 anchors
+    [M83AB302] 3 anchors
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W =  1 | MAE_sensor =  3.039 d | MAE_api =  8.550 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W =  2 | MAE_sensor =  3.736 d | MAE_api =  7.156 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W =  3 | MAE_sensor =  5.261 d | MAE_api =  7.964 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W =  5 | MAE_sensor =  8.110 d | MAE_api =  9.748 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W =  7 | MAE_sensor =  7.243 d | MAE_api =  8.318 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W = 10 | MAE_sensor =  6.494 d | MAE_api =  7.275 d | N = 40
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+  W = 14 | MAE_sensor = 10.881 d | MAE_api = 11.423 d | N = 40
+
+  Best W by Sensor MAE: 1
+==========================================================================================
+
+  Smoothing-window sweep saved -> outputs/diagnostics/rul_smoothing_window_sweep.parquet
+
+==========================================================================================
  PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
 ==========================================================================================
   [A164AB302c] trained on 134 rows from 3 cells
@@ -10,16 +87,16 @@
 ==========================================================================================
  PRE-COMPUTING SIMULATION UNITS
 ==========================================================================================
-  Sensor units: 20
-  API units   : 20
-  Total       : 40
+  Sensor units: 16
+  API units   : 16
+  Total       : 32
 
 ==========================================================================================
  BASELINE (current production defaults)
 ==========================================================================================
-  MAE_sensor = 9.793 days
-  MAE_api    = 9.908 days
-  N          = 40
+  MAE_sensor = 3.021 days
+  MAE_api    = 10.115 days
+  N          = 32
 
 ==========================================================================================
  PHASE 1: 1D SENSITIVITY ANALYSIS
@@ -27,215 +104,181 @@
   Baseline defaults: phi_0=0.0015, phi_1=0.0025, phi_2=1.5, lambda_w=1.0, mu=0.5, eps=1.0
 
   --- Sweeping phi_0 ---
-    phi_0      = 0.0005     | MAE_sensor = 10.369 | MAE_api = 10.482
-    phi_0      = 0.0010     | MAE_sensor = 10.109 | MAE_api = 10.212
-    phi_0      = 0.0015     | MAE_sensor =  9.793 | MAE_api =  9.908
-    phi_0      = 0.0025     | MAE_sensor =  9.182 | MAE_api =  9.339
-    phi_0      = 0.0050     | MAE_sensor =  8.207 | MAE_api =  8.476
-    phi_0      = 0.0100     | MAE_sensor =  6.784 | MAE_api =  7.401
+    phi_0      = 0.0005     | MAE_sensor =  2.838 | MAE_api = 10.914
+    phi_0      = 0.0010     | MAE_sensor =  2.855 | MAE_api = 10.496
+    phi_0      = 0.0015     | MAE_sensor =  3.021 | MAE_api = 10.115
+    phi_0      = 0.0025     | MAE_sensor =  3.491 | MAE_api =  9.353
+    phi_0      = 0.0050     | MAE_sensor =  4.849 | MAE_api =  8.401
+    phi_0      = 0.0100     | MAE_sensor =  6.892 | MAE_api =  8.783
 
   --- Sweeping phi_1 ---
-    phi_1      = 0.0010     | MAE_sensor = 10.556 | MAE_api = 11.610
-    phi_1      = 0.0025     | MAE_sensor =  9.793 | MAE_api =  9.908
-    phi_1      = 0.0050     | MAE_sensor =  8.418 | MAE_api =  8.572
-    phi_1      = 0.0100     | MAE_sensor =  6.998 | MAE_api =  7.689
-    phi_1      = 0.0200     | MAE_sensor =  9.016 | MAE_api =  9.278
+    phi_1      = 0.0010     | MAE_sensor =  2.674 | MAE_api = 14.210
+    phi_1      = 0.0025     | MAE_sensor =  3.021 | MAE_api = 10.115
+    phi_1      = 0.0050     | MAE_sensor =  5.074 | MAE_api =  8.039
+    phi_1      = 0.0100     | MAE_sensor =  8.044 | MAE_api =  9.121
+    phi_1      = 0.0200     | MAE_sensor = 11.881 | MAE_api = 12.044
 
   --- Sweeping phi_2 ---
-    phi_2      = 0.5000     | MAE_sensor =  9.667 | MAE_api = 10.552
-    phi_2      = 1.0000     | MAE_sensor =  9.796 | MAE_api = 10.229
-    phi_2      = 1.5000     | MAE_sensor =  9.793 | MAE_api =  9.908
-    phi_2      = 2.0000     | MAE_sensor =  9.684 | MAE_api =  9.622
-    phi_2      = 3.0000     | MAE_sensor =  9.508 | MAE_api =  9.298
-    phi_2      = 5.0000     | MAE_sensor =  9.256 | MAE_api =  9.047
+    phi_2      = 0.5000     | MAE_sensor =  2.278 | MAE_api = 11.994
+    phi_2      = 1.0000     | MAE_sensor =  2.585 | MAE_api = 10.970
+    phi_2      = 1.5000     | MAE_sensor =  3.021 | MAE_api = 10.115
+    phi_2      = 2.0000     | MAE_sensor =  3.441 | MAE_api =  9.263
+    phi_2      = 3.0000     | MAE_sensor =  4.439 | MAE_api =  7.922
+    phi_2      = 5.0000     | MAE_sensor =  6.224 | MAE_api =  7.804
 
   --- Sweeping lambda_w ---
-    lambda_w   = 0.5000     | MAE_sensor =  8.005 | MAE_api =  8.603
-    lambda_w   = 0.8000     | MAE_sensor =  9.164 | MAE_api =  9.467
-    lambda_w   = 1.0000     | MAE_sensor =  9.793 | MAE_api =  9.908
-    lambda_w   = 1.5000     | MAE_sensor = 10.838 | MAE_api = 10.660
-    lambda_w   = 2.0000     | MAE_sensor = 11.317 | MAE_api = 11.116
-    lambda_w   = 3.0000     | MAE_sensor = 11.526 | MAE_api = 11.686
+    lambda_w   = 0.5000     | MAE_sensor =  3.927 | MAE_api =  8.354
+    lambda_w   = 0.8000     | MAE_sensor =  3.290 | MAE_api =  9.414
+    lambda_w   = 1.0000     | MAE_sensor =  3.021 | MAE_api = 10.115
+    lambda_w   = 1.5000     | MAE_sensor =  2.825 | MAE_api = 11.944
+    lambda_w   = 2.0000     | MAE_sensor =  2.757 | MAE_api = 14.369
+    lambda_w   = 3.0000     | MAE_sensor =  2.672 | MAE_api = 21.374
 
   --- Sweeping mu ---
-    mu         = 0.2000     | MAE_sensor = 12.068 | MAE_api =  9.854
-    mu         = 0.3000     | MAE_sensor = 10.990 | MAE_api =  9.886
-    mu         = 0.5000     | MAE_sensor =  9.793 | MAE_api =  9.908
-    mu         = 0.7000     | MAE_sensor =  9.140 | MAE_api =  9.494
-    mu         = 0.9000     | MAE_sensor =  8.512 | MAE_api =  8.930
+    mu         = 0.2000     | MAE_sensor =  3.005 | MAE_api = 10.311
+    mu         = 0.3000     | MAE_sensor =  2.888 | MAE_api = 10.174
+    mu         = 0.5000     | MAE_sensor =  3.021 | MAE_api = 10.115
+    mu         = 0.7000     | MAE_sensor =  3.640 | MAE_api =  9.789
+    mu         = 0.9000     | MAE_sensor =  4.222 | MAE_api =  9.514
 
   --- Sweeping eps ---
-    eps        = 0.0000     | MAE_sensor =  9.618 | MAE_api =  9.593
-    eps        = 0.5000     | MAE_sensor =  9.734 | MAE_api =  9.756
-    eps        = 1.0000     | MAE_sensor =  9.793 | MAE_api =  9.908
-    eps        = 2.0000     | MAE_sensor =  9.840 | MAE_api = 10.051
-    eps        = 5.0000     | MAE_sensor = 10.033 | MAE_api = 10.248
+    eps        = 0.0000     | MAE_sensor =  3.006 | MAE_api =  9.937
+    eps        = 0.5000     | MAE_sensor =  3.013 | MAE_api = 10.054
+    eps        = 1.0000     | MAE_sensor =  3.021 | MAE_api = 10.115
+    eps        = 2.0000     | MAE_sensor =  3.094 | MAE_api = 10.177
+    eps        = 5.0000     | MAE_sensor =  3.328 | MAE_api = 10.300
 
   --- Sweeping k_blend ---
-    k_blend    = 0.0000     | MAE_sensor =  9.793 | MAE_api =  9.908
-    k_blend    = 0.1000     | MAE_sensor =  8.471 | MAE_api =  8.603
-    k_blend    = 0.2000     | MAE_sensor =  7.873 | MAE_api =  7.948
-    k_blend    = 0.3000     | MAE_sensor =  7.502 | MAE_api =  7.533
-    k_blend    = 0.4000     | MAE_sensor =  7.558 | MAE_api =  7.561
-    k_blend    = 0.5000     | MAE_sensor =  7.643 | MAE_api =  7.631
+    k_blend    = 0.0000     | MAE_sensor =  3.021 | MAE_api = 10.115
+    k_blend    = 0.1000     | MAE_sensor =  2.659 | MAE_api =  9.257
+    k_blend    = 0.2000     | MAE_sensor =  3.663 | MAE_api =  9.203
+    k_blend    = 0.3000     | MAE_sensor =  4.761 | MAE_api =  9.377
+    k_blend    = 0.4000     | MAE_sensor =  5.984 | MAE_api =  9.731
+    k_blend    = 0.5000     | MAE_sensor =  7.097 | MAE_api = 10.054
 
   --- Sweeping t_ref ---
-    t_ref      = 45.0000    | MAE_sensor =  9.793 | MAE_api =  9.908
-    t_ref      = 50.0000    | MAE_sensor =  9.793 | MAE_api =  9.908
-    t_ref      = 54.0000    | MAE_sensor =  9.793 | MAE_api =  9.908
-    t_ref      = 58.0000    | MAE_sensor =  9.793 | MAE_api =  9.908
-    t_ref      = 65.0000    | MAE_sensor =  9.793 | MAE_api =  9.908
+    t_ref      = 45.0000    | MAE_sensor =  3.021 | MAE_api = 10.115
+    t_ref      = 50.0000    | MAE_sensor =  3.021 | MAE_api = 10.115
+    t_ref      = 54.0000    | MAE_sensor =  3.021 | MAE_api = 10.115
+    t_ref      = 58.0000    | MAE_sensor =  3.021 | MAE_api = 10.115
+    t_ref      = 65.0000    | MAE_sensor =  3.021 | MAE_api = 10.115
 
   Sensitivity table saved -> outputs/diagnostics/rul_coeffs_sensitivity.parquet
 
 ==========================================================================================
  PHASE 2: FOCUSED N-D GRID SEARCH
 ==========================================================================================
-  Evaluating 1080 combinations on 40 simulation units...
-  [  10/1080] best so far: MAE_sensor = 5.312
-  [  20/1080] best so far: MAE_sensor = 5.312
-  [  30/1080] best so far: MAE_sensor = 5.312
-  [  40/1080] best so far: MAE_sensor = 5.300
-  [  50/1080] best so far: MAE_sensor = 5.300
-  [  60/1080] best so far: MAE_sensor = 5.294
-  [  70/1080] best so far: MAE_sensor = 5.294
-  [  80/1080] best so far: MAE_sensor = 5.294
-  [  90/1080] best so far: MAE_sensor = 5.294
-  [ 100/1080] best so far: MAE_sensor = 5.294
-  [ 110/1080] best so far: MAE_sensor = 5.294
-  [ 120/1080] best so far: MAE_sensor = 5.294
-  [ 130/1080] best so far: MAE_sensor = 5.012
-  [ 140/1080] best so far: MAE_sensor = 5.012
-  [ 150/1080] best so far: MAE_sensor = 4.983
-  [ 160/1080] best so far: MAE_sensor = 4.983
-  [ 170/1080] best so far: MAE_sensor = 4.983
-  [ 180/1080] best so far: MAE_sensor = 4.983
-  [ 190/1080] best so far: MAE_sensor = 4.983
-  [ 200/1080] best so far: MAE_sensor = 4.983
-  [ 210/1080] best so far: MAE_sensor = 4.983
-  [ 220/1080] best so far: MAE_sensor = 4.983
-  [ 230/1080] best so far: MAE_sensor = 4.983
-  [ 240/1080] best so far: MAE_sensor = 4.983
-  [ 250/1080] best so far: MAE_sensor = 4.817
-  [ 260/1080] best so far: MAE_sensor = 4.817
-  [ 270/1080] best so far: MAE_sensor = 4.814
-  [ 280/1080] best so far: MAE_sensor = 4.814
-  [ 290/1080] best so far: MAE_sensor = 4.814
-  [ 300/1080] best so far: MAE_sensor = 4.814
-  [ 310/1080] best so far: MAE_sensor = 4.814
-  [ 320/1080] best so far: MAE_sensor = 4.814
-  [ 330/1080] best so far: MAE_sensor = 4.814
-  [ 340/1080] best so far: MAE_sensor = 4.814
-  [ 350/1080] best so far: MAE_sensor = 4.814
-  [ 360/1080] best so far: MAE_sensor = 4.814
-  [ 370/1080] best so far: MAE_sensor = 4.814
-  [ 380/1080] best so far: MAE_sensor = 4.814
-  [ 390/1080] best so far: MAE_sensor = 4.814
-  [ 400/1080] best so far: MAE_sensor = 4.814
-  [ 410/1080] best so far: MAE_sensor = 4.814
-  [ 420/1080] best so far: MAE_sensor = 4.814
-  [ 430/1080] best so far: MAE_sensor = 4.814
-  [ 440/1080] best so far: MAE_sensor = 4.814
-  [ 450/1080] best so far: MAE_sensor = 4.814
-  [ 460/1080] best so far: MAE_sensor = 4.814
-  [ 470/1080] best so far: MAE_sensor = 4.814
-  [ 480/1080] best so far: MAE_sensor = 4.814
-  [ 490/1080] best so far: MAE_sensor = 4.814
-  [ 500/1080] best so far: MAE_sensor = 4.814
-  [ 510/1080] best so far: MAE_sensor = 4.814
-  [ 520/1080] best so far: MAE_sensor = 4.814
-  [ 530/1080] best so far: MAE_sensor = 4.814
-  [ 540/1080] best so far: MAE_sensor = 4.814
-  [ 550/1080] best so far: MAE_sensor = 4.814
-  [ 560/1080] best so far: MAE_sensor = 4.814
-  [ 570/1080] best so far: MAE_sensor = 4.814
-  [ 580/1080] best so far: MAE_sensor = 4.814
-  [ 590/1080] best so far: MAE_sensor = 4.814
-  [ 600/1080] best so far: MAE_sensor = 4.814
-  [ 610/1080] best so far: MAE_sensor = 4.814
-  [ 620/1080] best so far: MAE_sensor = 4.814
-  [ 630/1080] best so far: MAE_sensor = 4.814
-  [ 640/1080] best so far: MAE_sensor = 4.814
-  [ 650/1080] best so far: MAE_sensor = 4.814
-  [ 660/1080] best so far: MAE_sensor = 4.814
-  [ 670/1080] best so far: MAE_sensor = 4.814
-  [ 680/1080] best so far: MAE_sensor = 4.814
-  [ 690/1080] best so far: MAE_sensor = 4.814
-  [ 700/1080] best so far: MAE_sensor = 4.814
-  [ 710/1080] best so far: MAE_sensor = 4.814
-  [ 720/1080] best so far: MAE_sensor = 4.814
-  [ 730/1080] best so far: MAE_sensor = 4.814
-  [ 740/1080] best so far: MAE_sensor = 4.814
-  [ 750/1080] best so far: MAE_sensor = 4.814
-  [ 760/1080] best so far: MAE_sensor = 4.814
-  [ 770/1080] best so far: MAE_sensor = 4.814
-  [ 780/1080] best so far: MAE_sensor = 4.814
-  [ 790/1080] best so far: MAE_sensor = 4.814
-  [ 800/1080] best so far: MAE_sensor = 4.814
-  [ 810/1080] best so far: MAE_sensor = 4.814
-  [ 820/1080] best so far: MAE_sensor = 4.814
-  [ 830/1080] best so far: MAE_sensor = 4.814
-  [ 840/1080] best so far: MAE_sensor = 4.814
-  [ 850/1080] best so far: MAE_sensor = 4.814
-  [ 860/1080] best so far: MAE_sensor = 4.814
-  [ 870/1080] best so far: MAE_sensor = 4.814
-  [ 880/1080] best so far: MAE_sensor = 4.814
-  [ 890/1080] best so far: MAE_sensor = 4.814
-  [ 900/1080] best so far: MAE_sensor = 4.814
-  [ 910/1080] best so far: MAE_sensor = 4.814
-  [ 920/1080] best so far: MAE_sensor = 4.814
-  [ 930/1080] best so far: MAE_sensor = 4.814
-  [ 940/1080] best so far: MAE_sensor = 4.814
-  [ 950/1080] best so far: MAE_sensor = 4.814
-  [ 960/1080] best so far: MAE_sensor = 4.814
-  [ 970/1080] best so far: MAE_sensor = 4.814
-  [ 980/1080] best so far: MAE_sensor = 4.814
-  [ 990/1080] best so far: MAE_sensor = 4.814
-  [1000/1080] best so far: MAE_sensor = 4.814
-  [1010/1080] best so far: MAE_sensor = 4.814
-  [1020/1080] best so far: MAE_sensor = 4.814
-  [1030/1080] best so far: MAE_sensor = 4.814
-  [1040/1080] best so far: MAE_sensor = 4.814
-  [1050/1080] best so far: MAE_sensor = 4.814
-  [1060/1080] best so far: MAE_sensor = 4.814
-  [1070/1080] best so far: MAE_sensor = 4.814
-  [1080/1080] best so far: MAE_sensor = 4.814
+  Evaluating 729 combinations on 32 simulation units...
+  [  10/729] best so far: MAE_combined = 5.369
+  [  20/729] best so far: MAE_combined = 5.369
+  [  30/729] best so far: MAE_combined = 5.369
+  [  40/729] best so far: MAE_combined = 5.369
+  [  50/729] best so far: MAE_combined = 5.369
+  [  60/729] best so far: MAE_combined = 5.369
+  [  70/729] best so far: MAE_combined = 5.369
+  [  80/729] best so far: MAE_combined = 5.369
+  [  90/729] best so far: MAE_combined = 5.369
+  [ 100/729] best so far: MAE_combined = 5.369
+  [ 110/729] best so far: MAE_combined = 5.369
+  [ 120/729] best so far: MAE_combined = 5.369
+  [ 130/729] best so far: MAE_combined = 5.369
+  [ 140/729] best so far: MAE_combined = 5.369
+  [ 150/729] best so far: MAE_combined = 5.369
+  [ 160/729] best so far: MAE_combined = 5.369
+  [ 170/729] best so far: MAE_combined = 5.369
+  [ 180/729] best so far: MAE_combined = 5.369
+  [ 190/729] best so far: MAE_combined = 5.369
+  [ 200/729] best so far: MAE_combined = 5.369
+  [ 210/729] best so far: MAE_combined = 5.369
+  [ 220/729] best so far: MAE_combined = 5.369
+  [ 230/729] best so far: MAE_combined = 5.369
+  [ 240/729] best so far: MAE_combined = 5.369
+  [ 250/729] best so far: MAE_combined = 5.369
+  [ 260/729] best so far: MAE_combined = 5.369
+  [ 270/729] best so far: MAE_combined = 5.369
+  [ 280/729] best so far: MAE_combined = 5.369
+  [ 290/729] best so far: MAE_combined = 5.369
+  [ 300/729] best so far: MAE_combined = 5.369
+  [ 310/729] best so far: MAE_combined = 5.369
+  [ 320/729] best so far: MAE_combined = 5.369
+  [ 330/729] best so far: MAE_combined = 5.369
+  [ 340/729] best so far: MAE_combined = 5.369
+  [ 350/729] best so far: MAE_combined = 5.369
+  [ 360/729] best so far: MAE_combined = 5.369
+  [ 370/729] best so far: MAE_combined = 5.369
+  [ 380/729] best so far: MAE_combined = 5.369
+  [ 390/729] best so far: MAE_combined = 5.369
+  [ 400/729] best so far: MAE_combined = 5.369
+  [ 410/729] best so far: MAE_combined = 5.369
+  [ 420/729] best so far: MAE_combined = 5.369
+  [ 430/729] best so far: MAE_combined = 5.369
+  [ 440/729] best so far: MAE_combined = 5.369
+  [ 450/729] best so far: MAE_combined = 5.369
+  [ 460/729] best so far: MAE_combined = 5.369
+  [ 470/729] best so far: MAE_combined = 5.369
+  [ 480/729] best so far: MAE_combined = 5.369
+  [ 490/729] best so far: MAE_combined = 5.369
+  [ 500/729] best so far: MAE_combined = 5.369
+  [ 510/729] best so far: MAE_combined = 5.369
+  [ 520/729] best so far: MAE_combined = 5.369
+  [ 530/729] best so far: MAE_combined = 5.369
+  [ 540/729] best so far: MAE_combined = 5.369
+  [ 550/729] best so far: MAE_combined = 5.369
+  [ 560/729] best so far: MAE_combined = 5.369
+  [ 570/729] best so far: MAE_combined = 5.369
+  [ 580/729] best so far: MAE_combined = 5.369
+  [ 590/729] best so far: MAE_combined = 5.369
+  [ 600/729] best so far: MAE_combined = 5.369
+  [ 610/729] best so far: MAE_combined = 5.369
+  [ 620/729] best so far: MAE_combined = 5.369
+  [ 630/729] best so far: MAE_combined = 5.369
+  [ 640/729] best so far: MAE_combined = 5.369
+  [ 650/729] best so far: MAE_combined = 5.369
+  [ 660/729] best so far: MAE_combined = 5.369
+  [ 670/729] best so far: MAE_combined = 5.369
+  [ 680/729] best so far: MAE_combined = 5.369
+  [ 690/729] best so far: MAE_combined = 5.369
+  [ 700/729] best so far: MAE_combined = 5.369
+  [ 710/729] best so far: MAE_combined = 5.369
+  [ 720/729] best so far: MAE_combined = 5.369
+  [ 729/729] best so far: MAE_combined = 5.369
 
-  Top 10 combinations by Sensor MAE:
- phi_0  lambda_w   mu  eps  k_blend  t_ref  mae_sensor  mae_api  n
-0.0075       0.7 0.55  1.0      0.2   50.0    4.814114 5.492110 40
-0.0075       0.7 0.55  0.5      0.2   50.0    4.816746 5.464018 40
-0.0075       0.7 0.60  1.0      0.2   50.0    4.871090 5.548025 40
-0.0075       0.7 0.60  0.5      0.2   50.0    4.873191 5.502701 40
-0.0075       0.7 0.65  1.0      0.2   50.0    4.929497 5.580769 40
-0.0075       0.7 0.65  0.5      0.2   50.0    4.931126 5.523007 40
-0.0075       0.6 0.55  1.0      0.2   50.0    4.983450 5.481096 40
-0.0075       0.7 0.70  1.0      0.2   50.0    4.986940 5.598299 40
-0.0075       0.7 0.70  0.5      0.2   50.0    4.988155 5.544108 40
-0.0075       0.6 0.60  1.0      0.2   50.0    4.996963 5.500265 40
+  Top 10 combinations by COMBINED MAE (50/50 sensor/api):
+ phi_0  lambda_w  mu  eps  k_blend  t_ref  mae_sensor  mae_api  mae_combined  n
+0.0010       0.5 0.2  0.0      0.1   58.0    2.625499 8.111561      5.368530 32
+0.0010       0.5 0.2  0.5      0.1   58.0    2.625499 8.139686      5.382592 32
+0.0010       0.5 0.3  0.0      0.1   58.0    2.732318 8.038743      5.385530 32
+0.0010       0.5 0.2  1.0      0.1   58.0    2.625499 8.167811      5.396655 32
+0.0010       0.5 0.2  0.0      0.1   54.0    2.646086 8.153021      5.399554 32
+0.0010       0.5 0.3  0.5      0.1   58.0    2.732318 8.066868      5.399593 32
+0.0015       0.5 0.3  0.0      0.1   58.0    3.029875 7.783870      5.406872 32
+0.0015       0.5 0.2  0.0      0.1   58.0    2.950096 7.872421      5.411258 32
+0.0010       0.5 0.2  0.5      0.1   54.0    2.646086 8.181146      5.413616 32
+0.0010       0.5 0.3  1.0      0.1   58.0    2.732318 8.094993      5.413655 32
 
   Grid search table saved -> outputs/diagnostics/rul_coeffs_search.parquet
 
 ==========================================================================================
- BEST COMBINATION FOUND (by Sensor MAE)
+ BEST COMBINATION FOUND (by COMBINED MAE, 50/50 sensor/api)
 ==========================================================================================
   Swept coefficients:
-    phi_0      = 0.0075       (baseline 0.0015)
-    lambda_w   = 0.7000       (baseline 1.0)
-    mu         = 0.5500       (baseline 0.5)
-    eps        = 1.0000       (baseline 1.0)
-    k_blend    = 0.2000       (baseline 0.0)
-    t_ref      = 50.0000      (baseline 54.0)
+    phi_0      = 0.0010       (baseline 0.0015)
+    lambda_w   = 0.5000       (baseline 1.0)
+    mu         = 0.2000       (baseline 0.5)
+    eps        = 0.0000       (baseline 1.0)
+    k_blend    = 0.1000       (baseline 0.0)
+    t_ref      = 58.0000      (baseline 54.0)
 
   Held coefficients (not swept in Phase 2):
     phi_1      = 0.0025       (default)
     phi_2      = 1.5000       (default)
 
   Metrics:
-    MAE_sensor = 4.814  (baseline 9.793)
-    MAE_api    = 5.492  (baseline 9.908)
+    MAE_sensor   = 2.625  (baseline 3.021)
+    MAE_api      = 8.112  (baseline 10.115)
+    MAE_combined = 5.369  (baseline 6.568)
 
-  Improvement (Sensor) = +4.979 days (+50.8%)
+  Improvement (Combined 50/50) = +1.199 days (+18.3%)
 ==========================================================================================
 
   Calibrated coefficients persisted -> outputs/diagnostics/rul_coeffs_calibrated.json

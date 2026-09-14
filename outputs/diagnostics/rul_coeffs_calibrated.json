@@ -1,20 +1,23 @@
 {
-  "phi_0": 0.0075,
+  "phi_0": 0.001,
   "phi_1": 0.0025,
   "phi_2": 1.5,
-  "lambda_w": 0.7,
-  "mu": 0.55,
-  "eps": 1.0,
-  "k_blend": 0.2,
-  "t_ref": 50.0,
+  "lambda_w": 0.5,
+  "mu": 0.2,
+  "eps": 0.0,
+  "k_blend": 0.1,
+  "t_ref": 58.0,
   "metadata": {
-    "generated_at": "2026-09-13T19:19:36",
+    "generated_at": "2026-09-14T15:59:17",
     "generated_by": "src/rul_calibration_optimizer.py",
-    "grid_size": 1080,
-    "mae_sensor": 4.814113741557597,
-    "mae_api": 5.492110335334042,
-    "baseline_mae_sensor": 9.792853928536243,
-    "baseline_mae_api": 9.907551083463058,
-    "n_observations": 40
+    "grid_size": 729,
+    "mae_sensor": 2.625498693888728,
+    "mae_api": 8.11156054796843,
+    "mae_combined": 5.368529620928579,
+    "baseline_mae_sensor": 3.02121874592794,
+    "baseline_mae_api": 10.114716173214994,
+    "baseline_mae_combined": 6.5679674595714665,
+    "objective": "mae_combined_50_50",
+    "n_observations": 32
   }
 }

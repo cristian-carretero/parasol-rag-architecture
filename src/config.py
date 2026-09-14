@@ -109,6 +109,10 @@ FILE_RUL_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "rul_coeffs_calibrated.json"
 # Optimized kinematic coefficients (written by rul_calibration_optimizer.py).
 # When present, the 08 module loads these instead of the hardcoded baselines.
 
+FILE_API_HISTORY_CACHE = DIR_RUL / "08_api_history_cache.parquet"
+# Raw Open-Meteo archive history cached by module 08, reused by module 09
+# to avoid a second live fetch when the API is flaky.
+
 # [09_jv_mppt_trajectory_forecasting.py] ── Multivariate kinematic trajectory engines
 FILE_TRAJECTORY_MODELS = DIR_RUL / "09_trajectory_models.joblib"
 # Serialized dict {param -> fitted model}. Model family per parameter is

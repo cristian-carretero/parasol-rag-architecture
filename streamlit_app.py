@@ -2051,8 +2051,22 @@ def _render_rul_simulation_expander(
         df_sens["RUL_Real"] = true_survival - df_sens["Anchor_Day"]
 
         valid_sens = df_sens[df_sens["RUL_Real"] > 0]
-        mae_sens = float(np.mean(np.abs(valid_sens["RUL_Pred"] - valid_sens["RUL_Real"]))) if not valid_sens.empty else np.nan
-        mae_api = float(np.mean(np.abs(df_api.loc[valid_sens.index, "RUL_Pred"] - valid_sens["RUL_Real"]))) if not valid_sens.empty else np.nan
+        mae_sens = (
+            float(np.mean(np.abs(valid_sens["RUL_Pred"] - valid_sens["RUL_Real"])))
+            if not valid_sens.empty else np.nan
+        )
+
+        mae_api = np.nan
+        if not valid_sens.empty and not df_api.empty:
+            df_api_aligned = df_api.merge(
+                valid_sens[["Anchor_Day", "RUL_Real"]],
+                on="Anchor_Day",
+                how="inner",
+            )
+            if not df_api_aligned.empty:
+                mae_api = float(np.mean(np.abs(
+                    df_api_aligned["RUL_Pred"] - df_api_aligned["RUL_Real"]
+                )))
 
         # --- 1. KPI CARDS ---
         kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
@@ -2096,6 +2110,15 @@ def _render_rul_simulation_expander(
             annotation_font=dict(size=11, color="#DC2626")
         )
 
+        y_max_candidates = []
+        if pd.notna(true_survival):
+            y_max_candidates.append(float(true_survival - BURN_IN_DAYS + 10))
+        if not df_sens.empty:
+            y_max_candidates.append(float(df_sens["RUL_Pred"].max()) + 5)
+        if not df_api.empty:
+            y_max_candidates.append(float(df_api["RUL_Pred"].max()) + 5)
+        y_range = [0, max(y_max_candidates)] if y_max_candidates else None
+
         fig_rul.update_layout(
             title=dict(
                 text=f"<b>Forecast Convergence (Predicted vs. True RUL) — {selected_cell}</b>",
@@ -2109,7 +2132,7 @@ def _render_rul_simulation_expander(
             yaxis=dict(
                 title="Remaining Days until Collapse (T80)",
                 showgrid=True, gridcolor="#F1F5F9", zeroline=False,
-                range=[0, max(true_survival - BURN_IN_DAYS + 10, df_sens["RUL_Pred"].max() + 5)] if pd.notna(true_survival) else None
+                range=y_range
             ),
             height=370,
             margin=dict(l=20, r=20, t=65, b=20),
@@ -2242,15 +2265,28 @@ def _render_rul_simulation_expander(
             a = df_sim_api[df_sim_api["cell_name"] == cell].sort_values("Anchor_Day")
             if s.empty:
                 continue
+
             t_surv = s["True_Survival_Days"].iloc[0]
-            s_real = t_surv - s["Anchor_Day"]
-            valid = s_real > 0
-            mae_s_cell = float(np.mean(np.abs(s.loc[valid, "RUL_Pred"] - s_real[valid]))) if valid.any() else np.nan
-            if not a.empty and valid.any():
-                a_real = t_surv - a.loc[valid, "Anchor_Day"]
-                mae_a_cell = float(np.mean(np.abs(a.loc[valid, "RUL_Pred"] - a_real)))
-            else:
-                mae_a_cell = np.nan
+            s = s.assign(RUL_Real=t_surv - s["Anchor_Day"])
+            s_valid = s[s["RUL_Real"] > 0]
+
+            mae_s_cell = (
+                float(np.mean(np.abs(s_valid["RUL_Pred"] - s_valid["RUL_Real"])))
+                if not s_valid.empty else np.nan
+            )
+
+            mae_a_cell = np.nan
+            if not s_valid.empty and not a.empty:
+                merged = s_valid[["Anchor_Day", "RUL_Real"]].merge(
+                    a[["Anchor_Day", "RUL_Pred"]],
+                    on="Anchor_Day",
+                    how="inner",
+                )
+                if not merged.empty:
+                    mae_a_cell = float(np.mean(np.abs(
+                        merged["RUL_Pred"] - merged["RUL_Real"]
+                    )))
+
             summary_rows.append({
                 "Cell": cell,
                 "True Survival (d)": t_surv,
