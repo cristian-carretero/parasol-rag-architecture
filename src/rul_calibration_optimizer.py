@@ -1,7 +1,7 @@
 """
 Module: src/rul_calibration_optimizer.py
-Description: Empirical calibration of the six hardcoded coefficients of the
-             hybrid kinematics engine in 08_mppt_rul_forecasting.py.
+Description: Empirical calibration of the eight coefficients of the hybrid
+             kinematics engine in 08_mppt_rul_forecasting.py.
 
              Strategy:
                1. Pre-train the 4 blind XGBoost models (one per LOOCV fold).
@@ -10,8 +10,10 @@ Description: Empirical calibration of the six hardcoded coefficients of the
                   depend on the kinematic coefficients, so a full LOOCV
                   re-evaluation reduces to re-running only the closed-form
                   simulation loop.
-               3. Sweep coefficients via a 1D sensitivity analysis, then a
-                  focused N-D grid search, using Sensor MAE as the objective.
+                3. Sweep coefficients via a 1D sensitivity analysis, then a
+                  focused N-D TPE search (Optuna) over the same discrete
+                  GRID_ND, using the COMBINED MAE
+                  (0.5 * sensor + 0.5 * api) as the objective.
                4. Persist the winning coefficients to a JSON file that the 08
                   module loads automatically on its next run.
 
@@ -260,8 +262,8 @@ def compute_reference_anchors(
     df_daily: pd.DataFrame, healthy_cohort: List[str],
 ) -> Dict[str, List[float]]:
     """
-    Compute the reference anchor list per cell using the canonical W=7 daily
-    matrix. Used by the W sweep to guarantee that every candidate W is
+    Compute the reference anchor list per cell using the current SMOOTHING_WINDOW
+    daily matrix. Used by the W sweep to guarantee that every candidate W is
     evaluated over the same set of (cell, anchor) pairs.
     """
     anchors_by_cell: Dict[str, List[float]] = {}
@@ -379,15 +381,18 @@ GRID_1D = {
     "t_ref":    [45.0, 50.0, 54.0, 58.0, 65.0],
 }
 
-# Phase 2: focused N-D grid search on the most impactful coefficients.
-# phi_1 and phi_2 are held at their defaults (see BASELINE_REGISTRY).
-# NOTE: This grid is tuned for W=1 (the optimal smoothing window) and for
-# the COMBINED 50/50 objective (sensor + api). The optimum region for the
-# combined metric (per the 1D sensitivity) is around the baseline, not
-# in the sensor-favoured corner:
-#   phi_0 ~ 0.0025, lambda_w ~ 1.0, mu ~ 0.3, k_blend ~ 0.1
+# Phase 2: focused N-D grid search. phi_1 and phi_2 are now also calibrated
+# (previously held at their design values). See the ablation study in
+# src/audit_v_floor.py for the empirical justification of the floor.
+# NOTE: This grid is tuned for W=2 (the deployment-aligned smoothing window)
+# and for the COMBINED 50/50 objective (sensor + api). The optimum region
+# for the combined metric sits around:
+#   phi_0 ~ 0.0025, phi_1 ~ 0.0025, phi_2 ~ 1.5, lambda_w ~ 0.5,
+#   mu ~ 0.2, k_blend ~ 0.2, t_ref ~ 54
 GRID_ND = {
     "phi_0":    [0.0010, 0.0015, 0.0025],
+    "phi_1":    [0.0010, 0.0025, 0.0050],
+    "phi_2":    [1.0,    1.5,    2.0],
     "lambda_w": [0.5, 0.8, 1.0],
     "mu":       [0.20, 0.30, 0.50],
     "eps":      [0.0, 0.5, 1.0],
@@ -474,6 +479,84 @@ def run_phase_2_grid(units: List[SimulationUnit]) -> pd.DataFrame:
     print(df.head(10).to_string(index=False))
     return df
 
+# ==============================================================================
+# Phase 2 — Optuna TPE search (drop-in replacement for run_phase_2_grid)
+# ==============================================================================
+def run_phase_2_search(
+    units: List[SimulationUnit],
+    n_trials: int = 300,
+    seed: int = 42,
+    n_startup_trials: int = 50,
+) -> pd.DataFrame:
+    """
+    TPE-based search over the discrete GRID_ND. Same objective, same output
+    schema and same guardrails as `run_phase_2_grid`, but samples only a
+    fraction of the search space.
+
+    Why not the exhaustive grid: with phi_1 and phi_2 now calibrated, GRID_ND
+    has 3^8 = 6561 combinations at ~4 s/combo ≈ 7.3 h. The ablation study
+    (src/audit_v_floor.py) showed the MAE surface is very flat around the
+    optimum, so a plateau-wide search is sufficient and TPE converges in
+    100-200 trials. `run_phase_2_grid` is kept as a reference/fallback.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    full_grid_size = 1
+    for v in GRID_ND.values():
+        full_grid_size *= len(v)
+
+    print("\n" + "=" * 90)
+    print(f" PHASE 2: TPE SEARCH (Optuna) — {n_trials} trials, "
+          f"{n_startup_trials} startup")
+    print("=" * 90)
+    print(f"  Full grid cardinality : {full_grid_size} combinations")
+    print(f"  Sampling ratio        : {100 * n_trials / full_grid_size:.2f}% of the grid")
+
+    def objective(trial: "optuna.Trial") -> float:
+        kwargs = dict(
+            phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
+            phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
+            mu=MU_DEFAULT, eps=EPS_DEFAULT,
+            k_blend=K_BLEND_DEFAULT, t_ref=T_REF_DEFAULT,
+        )
+        for k in GRID_ND:
+            kwargs[k] = trial.suggest_categorical(k, GRID_ND[k])
+        res = evaluate_coefficients(units, **kwargs)
+        trial.set_user_attr("mae_sensor", res["mae_sensor"])
+        trial.set_user_attr("mae_api", res["mae_api"])
+        trial.set_user_attr("n", res["n"])
+        # Non-finite (API unreachable) → +inf so Optuna rejects the trial
+        return res["mae_combined"] if np.isfinite(res["mae_combined"]) else float("inf")
+
+    sampler = optuna.samplers.TPESampler(
+        seed=seed,
+        n_startup_trials=n_startup_trials,
+        multivariate=True,
+    )
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    rows = []
+    for t in study.trials:
+        if t.value is None or not np.isfinite(t.value):
+            continue
+        rows.append({
+            **t.params,
+            "mae_combined": t.value,
+            "mae_sensor":   t.user_attrs.get("mae_sensor", float("nan")),
+            "mae_api":      t.user_attrs.get("mae_api", float("nan")),
+            "n":            t.user_attrs.get("n", 0),
+        })
+
+    df = pd.DataFrame(rows).sort_values("mae_combined").reset_index(drop=True)
+
+    print(f"\n  Best trial        : #{study.best_trial.number}")
+    print(f"  Best MAE_combined : {study.best_value:.4f}")
+    print(f"  Best params       : {study.best_params}")
+    print("\n  Top 10 combinations by COMBINED MAE (50/50 sensor/api):")
+    print(df.head(10).to_string(index=False))
+    return df
 
 # ==============================================================================
 # Blind model pre-training
@@ -494,6 +577,54 @@ def pretrain_blind_models(
 
 
 # ==============================================================================
+# Mini grid for the local calibration inside the smoothing-window sweep.
+# ==============================================================================
+# This is a *small* subset of GRID_ND. It is run once per candidate W so that
+# each W is compared under its own best-case coefficients, not under the
+# (arbitrary) hardcoded baseline. Without this, the sweep picks W by sensor MAE
+# alone and collapses to W=1, which destroys the API regime.
+SWEEP_LOCAL_GRID = {
+    "phi_0":    [0.0010, 0.0015, 0.0025],   # spans baseline .. win-win corner
+    "lambda_w": [0.5, 0.8, 1.0],            # includes the baseline
+    "mu":       [0.20, 0.35, 0.50],         # spans calibrated .. baseline
+    "k_blend":  [0.0, 0.1, 0.2],            # includes the win-win 0.1
+}
+# 3 * 3 * 3 * 3 = 81 combos per W. eps and t_ref are held at their defaults
+# (they have negligible isolated effect) to keep the sweep tractable.
+
+
+def _sweep_local_calibrate(units_w: List[SimulationUnit]) -> Dict[str, float]:
+    """
+    Run a small local grid search on a given W's simulation units.
+
+    Returns a dict with the best combined MAE found for this W and the
+    coefficient combination that achieved it. Used by `sweep_smoothing_window`
+    to score each candidate W under its own best-case calibration, so the
+    sweep reflects what each W can *achieve*, not what the hardcoded baseline
+    does at that W.
+    """
+    keys = list(SWEEP_LOCAL_GRID.keys())
+    combos = list(itertools.product(*[SWEEP_LOCAL_GRID[k] for k in keys]))
+
+    best: Optional[Dict[str, float]] = None
+    for combo in combos:
+        kwargs = dict(
+            phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
+            phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
+            mu=MU_DEFAULT, eps=EPS_DEFAULT,
+            k_blend=K_BLEND_DEFAULT, t_ref=T_REF_DEFAULT,
+        )
+        for k, v in zip(keys, combo):
+            kwargs[k] = v
+        res = evaluate_coefficients(units_w, **kwargs)
+        if best is None or res["mae_combined"] < best["mae_combined"]:
+            best = {**res, **dict(zip(keys, combo))}
+
+    assert best is not None, "SWEEP_LOCAL_GRID must produce at least one combination"
+    return best
+
+
+# ==============================================================================
 # Dedicated sweep — smoothing window (rebuilds the full pipeline per W)
 # ==============================================================================
 def sweep_smoothing_window(
@@ -506,21 +637,29 @@ def sweep_smoothing_window(
     """
     For each candidate smoothing window W, rebuild the entire RUL pipeline
     (daily matrix -> blind models -> simulation units) and evaluate the
-    baseline kinematic coefficients. Returns one row per W with the LOOCV
-    MAE on the same scale as the rest of the report.
+    **best achievable** MAE for that W, using a small local calibration.
 
-    The sweep is deliberately separated from the fast `evaluate_coefficients`
-    re-evaluation because W affects the feature matrix and the trained model,
-    not just the kinematic simulation.
+    Why local calibration: the kinematic coefficients interact with W. The
+    optimal coefficients for W=1 differ from those for W=7. Comparing W's
+    under the hardcoded baseline (as the previous version did) tells us
+    which W works best under *that specific* coefficient set, not which W
+    works best in general. Running a small local grid per W removes that
+    confound.
 
     Anchors are frozen across W: the reference anchor set is computed once
     from the canonical W=7 daily matrix, and every candidate W is evaluated
     over exactly those (cell, anchor) pairs. This eliminates the survival
     bias of the earlier sweep, where W=1 produced 32 anchors vs 40 for W>=5.
+
+    Objective: the sweep is scored by MAE_combined (50/50 sensor/API), not
+    by sensor alone. Scoring by sensor would collapse to W=1, which hurts
+    the API regime that the production live forecast actually uses.
     """
     print("\n" + "=" * 90)
     print(" DEDICATED SWEEP: SMOOTHING WINDOW (rebuilds the whole pipeline per W)")
     print("=" * 90)
+    print(f"  Local calibration per W: {len(list(itertools.product(*SWEEP_LOCAL_GRID.values())))} combos")
+    print(f"  Objective: MAE_combined = 0.5 * MAE_sensor + 0.5 * MAE_api")
 
     # Fix the anchor set once, using the canonical W=7 daily matrix.
     df_daily_ref = build_rul_matrix(
@@ -533,33 +672,55 @@ def sweep_smoothing_window(
 
     rows = []
     for w in window_grid:
-        df_daily_w = build_rul_matrix(df_twin, healthy_cohort, smoothing_window=w)
-        blind_models_w = pretrain_blind_models(df_daily_w, healthy_cohort)
-        units_w = precompute_units(
-            df_daily_w, df_api_raw, t80_metrics, healthy_cohort, blind_models_w,
-            anchors_per_cell=anchors_by_cell,
-        )
+        # ----------------------------------------------------------------
+        # Monkey-patch: `precompute_units` and `simulate_rul_kinematics`
+        # read the module-level SMOOTHING_WINDOW constant (fixed at 1 in the
+        # production module). During the sweep we need them to see the
+        # candidate `w` so that the rolling features are trimmed to `w`
+        # observations, not to the production default. Without this patch,
+        # every candidate W>1 would be evaluated with mismatched rolling
+        # features (trained on W-day rolling, predicted with 1-day rolling),
+        # systematically underestimating its performance.
+        _original_sw = getattr(rul, "SMOOTHING_WINDOW")
+        setattr(rul, "SMOOTHING_WINDOW", w)
+        try:
+            df_daily_w = build_rul_matrix(df_twin, healthy_cohort, smoothing_window=w)
+            blind_models_w = pretrain_blind_models(df_daily_w, healthy_cohort)
+            units_w = precompute_units(
+                df_daily_w, df_api_raw, t80_metrics, healthy_cohort, blind_models_w,
+                anchors_per_cell=anchors_by_cell,
+            )
 
-        res = evaluate_coefficients(
-            units_w,
-            phi_0=PHI_0_DEFAULT, phi_1=PHI_1_DEFAULT,
-            phi_2=PHI_2_DEFAULT, lambda_w=LAMBDA_W_DEFAULT,
-            mu=MU_DEFAULT, eps=EPS_DEFAULT,
-        )
+            best_w = _sweep_local_calibrate(units_w)
+        finally:
+            setattr(rul, "SMOOTHING_WINDOW", _original_sw)
+
         rows.append({
             "smoothing_window": w,
-            "mae_sensor": res["mae_sensor"],
-            "mae_api": res["mae_api"],
-            "n": res["n"],
+            "mae_sensor":   best_w["mae_sensor"],
+            "mae_api":      best_w["mae_api"],
+            "mae_combined": best_w["mae_combined"],
+            "phi_0":        best_w["phi_0"],
+            "lambda_w":     best_w["lambda_w"],
+            "mu":           best_w["mu"],
+            "k_blend":      best_w["k_blend"],
+            "n":            best_w["n"],
         })
         print(
-            f"  W = {w:>2d} | MAE_sensor = {res['mae_sensor']:6.3f} d | "
-            f"MAE_api = {res['mae_api']:6.3f} d | N = {res['n']}"
+            f"  W = {w:>2d} | MAE_sensor = {best_w['mae_sensor']:6.3f} d | "
+            f"MAE_api = {best_w['mae_api']:6.3f} d | "
+            f"MAE_combined = {best_w['mae_combined']:6.3f} d | N = {best_w['n']} | "
+            f"best: phi_0={best_w['phi_0']:.4f}, lambda_w={best_w['lambda_w']:.2f}, "
+            f"mu={best_w['mu']:.2f}, k_blend={best_w['k_blend']:.2f}"
         )
 
-    df = pd.DataFrame(rows).sort_values("mae_sensor").reset_index(drop=True)
-    best_w = int(df.iloc[0]["smoothing_window"])
-    print(f"\n  Best W by Sensor MAE: {best_w}")
+    df = pd.DataFrame(rows).sort_values("mae_combined").reset_index(drop=True)
+    best_w_row = df.iloc[0]
+    print("\n" + "-" * 90)
+    print(f"  Best W by Combined MAE (50/50): {int(best_w_row['smoothing_window'])}")
+    print(f"  Expected MAE at that W: sensor={best_w_row['mae_sensor']:.3f} d, "
+          f"api={best_w_row['mae_api']:.3f} d, combined={best_w_row['mae_combined']:.3f} d")
+    print("-" * 90)
     print("=" * 90)
     return df
 
@@ -579,9 +740,12 @@ def print_final_summary(best: pd.Series, baseline: Dict[str, float]) -> None:
             print(f"    {k:<10s} = {float(best[k]):<10.4f}   (baseline {base_val})")
 
     print("\n  Held coefficients (not swept in Phase 2):")
-    for k in ["phi_1", "phi_2"]:
-        if k not in GRID_ND:
+    held = [k for k in BASELINE_REGISTRY if k not in GRID_ND]
+    if held:
+        for k in held:
             print(f"    {k:<10s} = {BASELINE_REGISTRY[k]:<10.4f}   (default)")
+    else:
+        print("    (none — all coefficients swept in Phase 2)")
 
     base_combined = 0.5 * baseline["mae_sensor"] + 0.5 * baseline["mae_api"]
     print("\n  Metrics:")
@@ -603,6 +767,7 @@ def persist_calibrated_coefficients(
     best_row: pd.Series,
     baseline: Dict[str, float],
     grid_size: int,
+    search_method: str = "TPE_optuna",
 ) -> None:
     """
     Write the winning coefficients to a JSON file consumed by the 08 module.
@@ -644,10 +809,21 @@ def persist_calibrated_coefficients(
     import json
     from datetime import datetime
 
+    # Derived search-space diagnostics. Computed from the current GRID_ND
+    # definition and the number of finite trials actually evaluated, so they
+    # stay consistent if the grid or the trial budget is ever changed.
+    grid_cardinality = 1
+    for v in GRID_ND.values():
+        grid_cardinality *= len(v)
+    search_ratio_pct = (
+        100.0 * grid_size / grid_cardinality if grid_cardinality else 0.0
+    )
+
     payload = {
+        "smoothing_window": int(SMOOTHING_WINDOW),
         "phi_0":    float(best_row["phi_0"]) if "phi_0" in best_row.index else PHI_0_DEFAULT,
-        "phi_1":    float(PHI_1_DEFAULT),
-        "phi_2":    float(PHI_2_DEFAULT),
+        "phi_1":    float(best_row["phi_1"]) if "phi_1" in best_row.index else PHI_1_DEFAULT,
+        "phi_2":    float(best_row["phi_2"]) if "phi_2" in best_row.index else PHI_2_DEFAULT,
         "lambda_w": float(best_row["lambda_w"]) if "lambda_w" in best_row.index else LAMBDA_W_DEFAULT,
         "mu":       float(best_row["mu"]) if "mu" in best_row.index else MU_DEFAULT,
         "eps":      float(best_row["eps"]) if "eps" in best_row.index else EPS_DEFAULT,
@@ -657,6 +833,9 @@ def persist_calibrated_coefficients(
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "generated_by": "src/rul_calibration_optimizer.py",
             "grid_size": grid_size,
+            "grid_cardinality": grid_cardinality,
+            "search_method": search_method,
+            "search_ratio_pct": round(search_ratio_pct, 2),
             "mae_sensor": float(best_row["mae_sensor"]),
             "mae_api": float(best_row["mae_api"]),
             "mae_combined": float(best_row["mae_combined"]),
@@ -665,6 +844,7 @@ def persist_calibrated_coefficients(
             "baseline_mae_combined": base_combined,
             "objective": "mae_combined_50_50",
             "n_observations": int(best_row["n"]),
+            "smoothing_window": int(SMOOTHING_WINDOW),
         },
     }
 
@@ -747,10 +927,10 @@ def _run() -> None:
     df_sens.to_parquet(SENSITIVITY_PATH, index=False)
     print(f"\n  Sensitivity table saved -> {SENSITIVITY_PATH}")
 
-    # ---- Phase 2 ----
-    df_grid = run_phase_2_grid(units)
+    # ---- Phase 2 (Optuna TPE) ----
+    df_grid = run_phase_2_search(units, n_trials=300, seed=42)
     df_grid.to_parquet(SEARCH_PATH, index=False)
-    print(f"\n  Grid search table saved -> {SEARCH_PATH}")
+    print(f"\n  TPE search table saved -> {SEARCH_PATH}")
 
     # ---- Final summary ----
     print_final_summary(df_grid.iloc[0], baseline)

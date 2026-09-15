@@ -213,25 +213,76 @@ XAI_PHYSICAL_FEATURES = [
 # Length of the "action window": how many days of early exposure are
 # evaluated for ML anomaly alerts. Also used by the dashboard as the
 # burn-in / audit cutoff, and by rul_forecasting.py to gate backtesting.
+#
+# The value is VALIDATED — not selected — by the phase-1 grid search.
+# The grid search identifies the "cohort plateau": the longest run of
+# consecutive candidate windows that produce the same set of surviving
+# cells. This plateau is a structural property of the T80 ground truth
+# and does not depend on any model or metric. BURN_IN_DAYS is set to
+# the geometric midpoint of that plateau, which minimises sensitivity
+# to small shifts in the underlying data.
+#
+# See src/07_jv_mppt_early_screening.py::_find_cohort_plateau for the
+# implementation, and the grid-search log for the current plateau range.
 BURN_IN_DAYS = 14.0
 
-# Candidate burn-in windows evaluated during the Phase 1 sensitivity search.
+# Candidate burn-in windows evaluated during the Phase 1 plateau analysis.
+# The candidate set must span a wide enough range to reveal where the
+# surviving cohort stabilises and where it starts to fragment. MAE values
+# are reported for transparency but are NOT used to select the burn-in;
+# they serve only as a sanity check that the plateau's midpoint is not a
+# pathological choice for downstream models.
 BURN_IN_GRID_WINDOWS = (5.0, 7.0, 10.0, 14.0, 21.0, 28.0, 35.0)
 
-# Minimum physically-meaningful residual (MAE) floor for each metric, so the
-# Digital Twin never derives an alert threshold tighter than the model's
-# own irreducible noise.
-MIN_PHYSICAL_MAE_PCE = 0.085
-MIN_PHYSICAL_MAE_PFF = 0.035
+ 
+# ------------------------------------------------------------------------------
+# Alert-threshold construction (module 07)
+# ------------------------------------------------------------------------------
+# The alert threshold per metric is computed as a layered decision:
+#
+#     threshold = max( alert_level, dynamic_floor, absolute_floor )
+#
+# where:
+#   alert_level   = RESIDUAL_ALERT_QUANTILE of the OOF residuals
+#   dynamic_floor = RESIDUAL_FLOOR_QUANTILE of the OOF residuals
+#   absolute_floor = MIN_PHYSICAL_MAE_*_ABSOLUTE
+#
+# Rationale: the primary decision boundary is a high quantile of the model's
+# own out-of-fold errors, so the alert is calibrated against how well the
+# model generalises rather than how well it memorises. The two floors are
+# guardrails that only activate if the model becomes unusually precise.
+#
+# Note: the OOF residuals come from a contiguous K-fold split (shuffle=False)
+# because the training matrix is time-ordered by (cell_name, Exposure_Days).
+# A shuffled split would leak future days of a cell into the training fold.
 
-# Percentage of in-action-window points flagged as anomalous above which a
-# cell is considered to be failing.
-ALERT_FREQUENCY_THRESHOLD_PCT = 50.0
-
-# Quantile of in-sample residuals used to set the per-metric alert threshold
-# (e.g. 0.98 -> "98th percentile"). Used both for training and for the empirical
-# audit chart.
+# Quantile of the OOF residuals used as the alert level ("98th percentile").
 RESIDUAL_ALERT_QUANTILE = 0.98
+
+# Dynamic floor: never let the alert threshold tighten below the model's own
+# quartile noise. Currently inactive (p25 << p98), but keeps the intent
+# explicit and self-adjusts if the model improves.
+RESIDUAL_FLOOR_QUANTILE = 0.25
+
+# Absolute floor: prevents the alert threshold from collapsing to zero on a
+# pathologically precise model. Intentionally small; acts only as a
+# last-resort guardrail, never as the primary decision boundary.
+MIN_PHYSICAL_MAE_PCE_ABSOLUTE = 0.01
+MIN_PHYSICAL_MAE_PFF_ABSOLUTE = 0.01
+
+# ------------------------------------------------------------------------------
+# Cell-level gate (module 07)
+# ------------------------------------------------------------------------------
+# A cell is flagged as failing if the fraction of in-action-window points
+# marked as alerts exceeds this percentage.
+#
+# Rationale: after migrating alert thresholds from in-sample to OOF residuals,
+# the alert-frequency scale dropped ~2x. The old 50% cutoff became
+# decorative. The production cohort is invariant for any value in
+# [10%, 50%] (validated by src/early_analyze_gate_threshold.py); 25% is
+# chosen for robustness against future cells with moderate (30-40%)
+# alert frequencies.
+ALERT_FREQUENCY_THRESHOLD_PCT = 25.0
 
 # XGBoost hyperparameters for the Dual Digital Twin (shared by the production
 # fit and every LOOCV fold).

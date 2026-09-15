@@ -860,38 +860,102 @@ def add_fleet_t80_lines(
 
 
 def create_burn_in_optimization_chart(df_grid: pd.DataFrame, optimal_window: float) -> go.Figure:
+    """
+    Structural plateau chart for the burn-in selection.
+
+    The winner is NOT chosen by MAE; it is the geometric midpoint of the
+    longest consecutive run of windows producing the same survivor cohort
+    (the "plateau"). MAE and SE are reported as post-hoc validation.
+
+    Visual layers:
+      - Bar: cohort size (N), right axis.
+      - Line + band: MAE PCE with ±1 SE, left axis.
+      - Dotted line: MAE pFF, left axis.
+      - Shaded region: windows belonging to the structural plateau.
+      - Vertical dash: the selected window.
+    """
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
+    # --- Cohort size (bars, right axis) ---
     fig.add_trace(go.Bar(
         x=df_grid["Window_Days"], y=df_grid["Healthy_Cells_N"],
         name="Healthy Cells (N)", marker_color="rgba(100, 116, 139, 0.2)",
-        hovertemplate="<b>%{x} Days</b><br>Healthy Cells: %{y}<extra></extra>"
+        hovertemplate="<b>%{x} Days</b><br>Healthy Cells: %{y}<extra></extra>",
     ), secondary_y=True)
 
-    fig.add_trace(go.Scatter(
-        x=df_grid["Window_Days"], y=df_grid["LOOCV_MAE_PCE"],
-        mode="lines+markers", name="MAE PCE",
-        line=dict(color="#10B981", width=3), marker=dict(size=8),
-        hovertemplate="<b>%{x} Days</b><br>MAE PCE: %{y:.4f}<extra></extra>"
-    ), secondary_y=False)
+    # --- MAE PCE with ±1 SE band (left axis) ---
+    if "MAE_PCE" in df_grid.columns:
+        mae_pce = pd.to_numeric(df_grid["MAE_PCE"], errors="coerce")
+        se_pce = pd.to_numeric(df_grid.get("SE_PCE", pd.Series(0.0, index=df_grid.index)), errors="coerce").fillna(0.0)
+        upper = mae_pce + se_pce
+        lower = mae_pce - se_pce
 
-    fig.add_trace(go.Scatter(
-        x=df_grid["Window_Days"], y=df_grid["LOOCV_MAE_pFF"],
-        mode="lines+markers", name="MAE pFF",
-        line=dict(color="#3B82F6", width=3, dash="dot"), marker=dict(size=8),
-        hovertemplate="<b>%{x} Days</b><br>MAE pFF: %{y:.4f}<extra></extra>"
-    ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=df_grid["Window_Days"], y=upper, mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=df_grid["Window_Days"], y=lower, mode="lines",
+            line=dict(width=0), fill="tonexty",
+            fillcolor="rgba(16, 185, 129, 0.15)",
+            showlegend=False, hoverinfo="skip",
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=df_grid["Window_Days"], y=mae_pce,
+            mode="lines+markers", name="MAE PCE (±1 SE)",
+            line=dict(color="#10B981", width=3), marker=dict(size=8),
+            hovertemplate="<b>%{x} Days</b><br>MAE PCE: %{y:.4f}<extra></extra>",
+        ), secondary_y=False)
 
-    fig.add_vline(x=optimal_window, line=dict(color="#F43F5E", width=2, dash="dash"),
-                  annotation_text=f"Optimal Threshold ({optimal_window:g}d)", annotation_position="top right")
+    # --- MAE pFF (dotted, left axis) ---
+    if "MAE_pFF" in df_grid.columns:
+        fig.add_trace(go.Scatter(
+            x=df_grid["Window_Days"], y=df_grid["MAE_pFF"],
+            mode="lines+markers", name="MAE pFF",
+            line=dict(color="#3B82F6", width=2, dash="dot"), marker=dict(size=6),
+            hovertemplate="<b>%{x} Days</b><br>MAE pFF: %{y:.4f}<extra></extra>",
+        ), secondary_y=False)
 
+    # --- Structural plateau shading ---
+    if "In_Plateau" in df_grid.columns:
+        plateau = df_grid[df_grid["In_Plateau"].fillna(False).astype(bool)]
+        if not plateau.empty:
+            fig.add_vrect(
+                x0=float(plateau["Window_Days"].min()) - 1.0,
+                x1=float(plateau["Window_Days"].max()) + 1.0,
+                fillcolor="rgba(59, 130, 246, 0.08)",
+                line_width=0,
+                annotation_text="Structural plateau",
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#3B82F6"),
+            )
+
+    # --- Selected window ---
+    fig.add_vline(
+        x=optimal_window,
+        line=dict(color="#F43F5E", width=2, dash="dash"),
+        annotation_text=f"Selected ({optimal_window:g}d)",
+        annotation_position="top right",
+    )
+
+    y_max_n = max(10, int(pd.to_numeric(df_grid["Healthy_Cells_N"], errors="coerce").max()) + 1)
     fig.update_layout(**_base_chart_layout(
-        height=400,
-        title=dict(text="Empirical Burn-in Window Optimization (Elbow Method)", font=dict(color="#1E293B")),
-        xaxis=dict(title="Candidate Window (Days)", tickvals=df_grid["Window_Days"], showgrid=True, gridcolor="#F1F5F9"),
-        yaxis=dict(title="LOOCV Mean Absolute Error", showgrid=True, gridcolor="#F1F5F9"),
-        yaxis2=dict(title="Cohort Size (N)", showgrid=False, range=[0, 10]),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        height=420,
+        title=dict(
+            text="Burn-in Window: Structural Cohort Plateau",
+            font=dict(color="#1E293B"),
+        ),
+        xaxis=dict(
+            title="Candidate Window (Days)",
+            tickvals=df_grid["Window_Days"],
+            showgrid=True, gridcolor="#F1F5F9",
+        ),
+        yaxis=dict(
+            title="MAE (OOF, per-cell mean)",
+            showgrid=True, gridcolor="#F1F5F9",
+        ),
+        yaxis2=dict(title="Cohort Size (N)", showgrid=False, range=[0, y_max_n]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     ))
     return fig
 
@@ -1562,13 +1626,17 @@ def _render_combined_twin_audit_expander(
             df_grid = load_grid_search_data()
 
             if df_grid.empty:
-                st.info("No grid search optimization data available. Ensure Phase 1 of the pipeline has been executed.")
+                st.info(
+                    "No grid search optimization data available. "
+                    "Ensure Phase 1 of the pipeline has been executed."
+                )
             else:
-                st.markdown("##### Empirical Burn-in Window Determination")
+                st.markdown("##### Burn-in Window Determination")
                 st.caption(
-                    "Sensitivity analysis evaluating the stabilization of the Digital Twin's validation error "
-                    "across different temporal windows. This mathematical approach formally defines the end of "
-                    "the infant mortality phase, avoiding arbitrarily selected constants."
+                    "The burn-in is selected structurally, not by MAE: it is the geometric "
+                    "midpoint of the longest consecutive run of windows producing the same "
+                    "survivor cohort. MAE and its standard error are reported as post-hoc "
+                    "validation that the chosen window is not pathological."
                 )
 
                 fig_grid = create_burn_in_optimization_chart(df_grid, BURN_IN_DAYS)
@@ -1579,22 +1647,60 @@ def _render_combined_twin_audit_expander(
                     df_grid,
                     column_config={
                         "Window_Days": st.column_config.NumberColumn("Window (Days)", format="%.1f"),
-                        "Healthy_Cells_N": st.column_config.NumberColumn("Mature Cohort (N)", format="%d"),
+                        "Healthy_Cells_N": st.column_config.NumberColumn("Cohort (N)", format="%d"),
+                        "Action_Points_PCE": st.column_config.NumberColumn("Action Points", format="%d"),
+                        "N_Folds_PCE": st.column_config.NumberColumn("Folds PCE", format="%d"),
+                        "N_Folds_pFF": st.column_config.NumberColumn("Folds pFF", format="%d"),
                         "Q98_PCE_Raw": st.column_config.NumberColumn("Q98 PCE", format="%.4f"),
                         "Q98_pFF_Raw": st.column_config.NumberColumn("Q98 pFF", format="%.4f"),
-                        "LOOCV_MAE_PCE": st.column_config.NumberColumn("LOOCV MAE (PCE)", format="%.4f"),
-                        "LOOCV_MAE_pFF": st.column_config.NumberColumn("LOOCV MAE (pFF)", format="%.4f"),
+                        "MAE_PCE": st.column_config.NumberColumn("MAE PCE", format="%.4f"),
+                        "SE_PCE": st.column_config.NumberColumn("SE PCE", format="%.4f"),
+                        "MAE_pFF": st.column_config.NumberColumn("MAE pFF", format="%.4f"),
+                        "SE_pFF": st.column_config.NumberColumn("SE pFF", format="%.4f"),
+                        "In_Plateau": st.column_config.CheckboxColumn("In plateau"),
+                        "Is_Selected": st.column_config.CheckboxColumn("Selected"),
                     },
-                    hide_index=True, width="stretch"
+                    hide_index=True, width="stretch",
                 )
 
-                st.success(
-                    f"**Mathematical Justification:** The grid search analysis validates the selection of "
-                    f"**{BURN_IN_DAYS:g} days** as the optimal burn-in threshold. At this point, "
-                    f"the physical cohort stabilizes and the generalization error (LOOCV MAE) breaks its minimum floor. "
-                    f"Extending the window beyond {BURN_IN_DAYS:g} days would severely degrade the available "
-                    f"training data volume without actionable predictive benefits."
-                )
+                # --- Structural justification (replaces the old "elbow" narrative) ---
+                if "In_Plateau" in df_grid.columns:
+                    plateau_df = df_grid[df_grid["In_Plateau"].fillna(False).astype(bool)]
+                else:
+                    plateau_df = pd.DataFrame()
+
+                if "Is_Selected" in df_grid.columns:
+                    selected_row = df_grid[df_grid["Is_Selected"].fillna(False).astype(bool)]
+                else:
+                    selected_row = pd.DataFrame()
+
+                if not plateau_df.empty and not selected_row.empty:
+                    plateau_windows = ", ".join(
+                        f"{w:g}" for w in sorted(plateau_df["Window_Days"].tolist())
+                    )
+                    selected_w = float(selected_row["Window_Days"].iloc[0])
+                    n_plateau = int(plateau_df["Healthy_Cells_N"].iloc[0])
+
+                    if abs(selected_w - BURN_IN_DAYS) < 1e-6:
+                        coincidence_text = "which coincides with the configured `BURN_IN_DAYS`."
+                    else:
+                        coincidence_text = (
+                            f"which does **not** match the configured `BURN_IN_DAYS={BURN_IN_DAYS:g}`. "
+                            f"Update `config.py` to align the pipeline with the structural evidence."
+                        )
+
+                    st.success(
+                        f"**Structural selection:** the plateau of invariant cohorts is "
+                        f"W ∈ {{{plateau_windows}}} days (N={n_plateau} cells). The geometric "
+                        f"midpoint of the plateau is **W={selected_w:g} days**, {coincidence_text} "
+                        f"Any window in the plateau produces the same survivor cohort; the choice "
+                        f"of the midpoint minimizes sensitivity to perturbations in the underlying data."
+                    )
+                else:
+                    st.info(
+                        "Plateau information not found in the grid search parquet. "
+                        "Re-run module 07 to regenerate the artifact with the structural columns."
+                    )
 
         with tab_audit:
             df_render = _prepare_audit_summary(ml_artifacts, "summary_table", active_cells_window, absolute_day_zero, max_t)

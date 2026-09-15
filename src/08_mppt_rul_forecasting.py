@@ -44,7 +44,7 @@ logger = logging.getLogger("PCE_Forecasting")
 # ==============================================================================
 # MODULE-LEVEL CONFIGURATION
 # ==============================================================================
-SMOOTHING_WINDOW = 1   # ventana de la mediana móvil (W=1 confirmado óptimo por sweep)
+SMOOTHING_WINDOW = 2   # ventana de la mediana móvil
 ANCHOR_SPACING   = 7   # días entre anclas de backtesting
 SIMULATION_WINDOW = 14
 T80_DAMAGE_LIMIT = 1.0 - T80_FRACTION  # Universal 0.20
@@ -121,6 +121,9 @@ def _load_calibrated_coefficients() -> dict:
         for k in optional:
             if k in data:
                 result[k] = float(data[k])
+        # Smoothing_window for consistency checks
+        if "smoothing_window" in data:
+            result["smoothing_window"] = int(data["smoothing_window"])
         return result
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
         logger.warning(f"Failed to load calibrated coefficients JSON: {exc}")
@@ -147,6 +150,15 @@ if _CALIBRATED:
     EPS_DEFAULT = _CALIBRATED["eps"]
     K_BLEND_DEFAULT = _CALIBRATED.get("k_blend", K_BLEND_HARDCODED)
     T_REF_DEFAULT = _CALIBRATED.get("t_ref", T_REF_HARDCODED)
+    _cal_w = _CALIBRATED.get("smoothing_window")
+    if _cal_w is not None and _cal_w != SMOOTHING_WINDOW:
+        logger.warning(
+            f"Calibrated coefficients JSON was produced for "
+            f"SMOOTHING_WINDOW={_cal_w}, but the module is running with "
+            f"SMOOTHING_WINDOW={SMOOTHING_WINDOW}. The coefficients are NOT "
+            f"optimal for this W. Re-run the optimizer or restore "
+            f"SMOOTHING_WINDOW={_cal_w}."
+        )
     logger.info(
         f"Using CALIBRATED kinematic coefficients: "
         f"phi_0={PHI_0_DEFAULT}, phi_1={PHI_1_DEFAULT}, phi_2={PHI_2_DEFAULT}, "
@@ -480,19 +492,17 @@ def run_dynamic_backtesting(
     k_blend: float = K_BLEND_DEFAULT,
     t_ref: float = T_REF_DEFAULT,
     kinematic_coeffs: Optional[dict] = None,
+    target_days: Optional[dict] = None,     
 ) -> List[dict]:
     """
     Run dynamic backtesting for a single cell across weekly anchors.
 
-    - Sensor mode: uses the cell's real future weather (oracle upper bound).
-    - API mode:    calibrates walk-forward at each anchor using only past data
-                   from `train_cells`, then applies it to future API weather.
-
     Args:
-        mu, eps: soft-countdown coefficients (see module-level defaults).
-        kinematic_coeffs: optional dict with keys {'phi_0','phi_1','phi_2',
-                          'lambda_w'} forwarded to simulate_rul_kinematics.
-                          If None, the module defaults are used.
+        ...
+        target_days: optional dict {cell_name: survival_days} loaded from
+                     the screening artifact (schema v2). When provided, it
+                     overrides the local re-derivation of the ground truth
+                     from t80_metrics, making the 07->08 contract explicit.
     """
     coeffs = kinematic_coeffs or {}
     phi_0 = coeffs.get("phi_0", PHI_0_DEFAULT)
@@ -505,7 +515,13 @@ def run_dynamic_backtesting(
         return []
 
     true_survival_days: Optional[float] = None
-    if cell in t80_metrics.index:
+    if target_days is not None and cell in target_days:
+        # v2 contract: ground truth comes from the screening artifact.
+        value = target_days[cell]
+        if value is not None and np.isfinite(value):
+            true_survival_days = float(value)
+    elif cell in t80_metrics.index:
+        # Legacy fallback (pre-v2 artifact): re-derive from t80_metrics.
         value = pd.to_numeric(
             t80_metrics.loc[cell, "survival_days_pce"],
             errors="coerce",
@@ -815,7 +831,23 @@ def main() -> None:
     try:
         df_twin = pd.read_parquet(FILE_HEALTHY_COHORT)
         t80_metrics = pd.read_parquet(FILE_T80_TRUTH)
-        healthy_cohort = joblib.load(FILE_SCREENING_ARTIFACTS)["healthy_cohort"]
+
+        artifact = joblib.load(FILE_SCREENING_ARTIFACTS)
+        schema_version = artifact.get("schema_version", 1)
+        if schema_version < 2:
+            logger.warning(
+                "Screening artifact has no schema_version (legacy v1). "
+                "Falling back to hardcoded 'survival_days_pce' derivation. "
+                "Re-run module 07 to produce a v2 artifact."
+            )
+
+        healthy_cohort = artifact["healthy_cohort"]
+        target_metric = artifact.get("t80_target_metric", "survival_days_pce")
+        target_days = artifact.get("t80_target_days", {})
+        logger.info(
+            f"Screening artifact loaded (schema v{schema_version}, "
+            f"target_metric='{target_metric}', n_targets={len(target_days)})"
+        )
 
         # Inject PCE_initial into df_twin from t80_metrics before building the matrix
         if "PCE_initial" not in df_twin.columns:
@@ -854,6 +886,7 @@ def main() -> None:
                 blind_model_pce,
                 t80_metrics,
                 train_cells=train_cells,
+                target_days=target_days,
             )
             all_records.extend(records)
 

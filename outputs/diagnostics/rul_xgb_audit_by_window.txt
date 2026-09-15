@@ -1,0 +1,36 @@
+
+========================================================================================================
+ PER-W XGBoost AUDIT — rebuilding daily matrix and retraining per W
+========================================================================================================
+  Evaluating W =  1 ...
+  Evaluating W =  2 ...
+  Evaluating W =  3 ...
+  Evaluating W =  5 ...
+  Evaluating W =  7 ...
+  Evaluating W = 10 ...
+  Evaluating W = 14 ...
+
+========================================================================================================
+ XGBoost SIGNAL AUDIT AS A FUNCTION OF THE SMOOTHING WINDOW W
+========================================================================================================
+ Target : Daily_Damage_Increment
+ Models : XGBoost(production params)  vs  Dummy(mean)
+ CV     : KFold(5, shuffle, seed=42)
+ Metric : Delta_MAE% = 100 * (MAE_dummy - MAE_xgb) / MAE_dummy
+
+    W      N    sigma(dD)   skew(dD)   %zero(dD)    MAE_dummy      MAE_xgb    R2_xgb   dMAE vs Dummy
+  --------------------------------------------------------------------------------------------------
+    1    163      0.12154     +1.203       0.61%      0.07520      0.05807   +0.4344         +22.78%
+    2    163      0.07036     +0.914       0.61%      0.04594      0.03908   +0.3245         +14.93%   <-- produccion
+    3    163      0.05963     +0.618      35.58%      0.03024      0.02867   +0.2057          +5.18%
+    5    163      0.04724     +2.549      31.29%      0.02372      0.02318   +0.0083          +2.25%   [~] senal debil
+    7    163      0.04289     +2.836      36.81%      0.01964      0.01856   +0.0983          +5.49%
+   10    163      0.03878     +3.504      31.29%      0.01680      0.01602   +0.0646          +4.65%
+   14    163      0.03823     +3.698      28.22%      0.01571      0.01514   +0.0572          +3.62%
+========================================================================================================
+
+  Lectura:
+    - Maxima utilidad del ML en W = 1  (dMAE = +22.78%,  MAE_xgb = 0.05807  vs  MAE_dummy = 0.07520)
+    - En W = 7 el XGBoost aporta dMAE = +5.49%  ->  senal VIVA
+
+  Results table saved -> outputs/diagnostics/rul_xgb_audit_by_window.parquet

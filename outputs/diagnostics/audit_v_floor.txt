@@ -1,0 +1,60 @@
+
+==========================================================================================
+ PRE-TRAINING BLIND XGBOOST MODELS (ONE PER LOOCV FOLD)
+==========================================================================================
+  [A164AB302c] trained on 134 rows from 3 cells
+  [A167AB344a] trained on 108 rows from 3 cells
+  [ASLRXAB341] trained on 108 rows from 3 cells
+  [M83AB302] trained on 139 rows from 3 cells
+
+  Simulation units: 19 sensor + 19 API = 38 total
+
+==========================================================================================
+ ABLATION STUDY — STRUCTURAL FLOOR  v_floor(rho) = phi_0 + phi_1 * exp(phi_2 * rho)
+==========================================================================================
+  Reference (calibrated production coefficients):
+    phi_0      = 0.0025
+    phi_1      = 0.0025
+    phi_2      = 1.5
+    lambda_w   = 0.5
+    mu         = 0.2
+    eps        = 0.0
+    k_blend    = 0.2
+    t_ref      = 54.0
+
+  full_calibrated        | MAE_sensor=  4.919 d | MAE_api=  5.069 d | MAE_combined=  4.994 d
+  no_floor               | MAE_sensor= 38.278 d | MAE_api= 47.237 d | MAE_combined= 42.757 d
+  constant_only          | MAE_sensor=  7.349 d | MAE_api= 12.997 d | MAE_combined= 10.173 d
+  exponential_only       | MAE_sensor=  5.699 d | MAE_api=  6.630 d | MAE_combined=  6.164 d
+  no_asymptotic_accel    | MAE_sensor=  4.690 d | MAE_api=  6.363 d | MAE_combined=  5.526 d
+  weight_always_one      | MAE_sensor=  7.023 d | MAE_api=  6.759 d | MAE_combined=  6.891 d
+  hardcoded_floor        | MAE_sensor=  5.045 d | MAE_api=  5.430 d | MAE_combined=  5.238 d
+
+------------------------------------------------------------------------------------------
+ DELTA vs. FULL CALIBRATED  (positive ⇒ the mutation HURTS the engine)
+------------------------------------------------------------------------------------------
+  no_floor               | Δsensor=+33.359 d | Δapi=+42.168 d | Δcombined=+37.763 d
+  constant_only          | Δsensor= +2.431 d | Δapi= +7.928 d | Δcombined= +5.180 d
+  exponential_only       | Δsensor= +0.781 d | Δapi= +1.561 d | Δcombined= +1.171 d
+  no_asymptotic_accel    | Δsensor= -0.229 d | Δapi= +1.294 d | Δcombined= +0.533 d
+  weight_always_one      | Δsensor= +2.105 d | Δapi= +1.690 d | Δcombined= +1.897 d
+  hardcoded_floor        | Δsensor= +0.127 d | Δapi= +0.361 d | Δcombined= +0.244 d
+
+==========================================================================================
+ VERDICT
+==========================================================================================
+  Full removal of the floor (phi_0=phi_1=phi_2=0):
+    ΔMAE_sensor   = +33.359 d
+    ΔMAE_api      = +42.168 d
+    ΔMAE_combined = +37.763 d
+  => El suelo estructural APORTA valor SUSTANCIAL (Δcombined = +37.763 d).
+
+  Notas sobre los sub-experimentos:
+    solo término constante (φ₁=0)                              Δcombined =  +5.180 d  [PEOR]
+    solo término exponencial (φ₀=0)                            Δcombined =  +1.171 d  [PEOR]
+    sin aceleración asintótica (φ₂=0)                          Δcombined =  +0.533 d  [PEOR]
+    peso del suelo saturado a 1 (λ_w=0)                        Δcombined =  +1.897 d  [PEOR]
+    suelo pre-calibración (aisla el paso de calibración)       Δcombined =  +0.244 d  [PEOR]
+
+  Ablation table saved -> outputs/diagnostics/audit_v_floor.parquet
+==========================================================================================

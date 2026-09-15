@@ -4,15 +4,30 @@ Description: Infant mortality screening and LOOCV gate.
 Phase 1: Executes an empirical Grid Search to determine the optimal burn-in window.
 Phase 2: Uses the pre-calculated physical health (T80) to isolate the mature phase
 of healthy cells and trains a Dual Digital Twin (PCE & pFF) for rapid anomaly detection.
+
+Threshold policy
+----------------
+Alert thresholds are derived from OUT-OF-FOLD (OOF) absolute residuals of the
+trained models, never from in-sample predictions. In-sample thresholds are
+systematically optimistic (typically 2-3x tighter than OOF) and inflate the
+alert-frequency signal that the gate depends on. OOF thresholds are a
+principled approximation to the residuals the model would produce on new data.
+
+Each threshold is the maximum of three layers:
+  - alert level      = RESIDUAL_ALERT_QUANTILE of the OOF residuals
+  - dynamic floor    = RESIDUAL_FLOOR_QUANTILE of the OOF residuals
+  - absolute floor   = MIN_PHYSICAL_MAE_*_ABSOLUTE (last-resort guardrail)
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, cast
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from sklearn.model_selection import KFold
 
 from src.config import (
     ALERT_FREQUENCY_THRESHOLD_PCT,
@@ -20,13 +35,14 @@ from src.config import (
     BURN_IN_GRID_WINDOWS,
     DAYLIGHT_IRRADIANCE_MIN_W_M2,
     FEATURES,
-    MIN_PHYSICAL_MAE_PCE,
-    MIN_PHYSICAL_MAE_PFF,
+    MIN_PHYSICAL_MAE_PCE_ABSOLUTE,
+    MIN_PHYSICAL_MAE_PFF_ABSOLUTE,
     PCE_INITIAL_REF_FLOOR,
     RESIDUAL_ALERT_QUANTILE,
+    RESIDUAL_FLOOR_QUANTILE,
     XGB_PCE_PARAMS,
     XGB_PFF_PARAMS,
-    )
+)   
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
@@ -34,15 +50,125 @@ from src.config import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("EarlyScreening")
 
+
+# ==============================================================================
+# STATISTICAL HELPERS
+# ==============================================================================
+def oof_abs_residuals(
+    model_factory,
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_splits: int = 5,
+) -> np.ndarray:
+    """
+    Out-of-fold absolute residuals.
+
+    Splits are contiguous (shuffle=False) because X is ordered by
+    (cell_name, Exposure_Days). A shuffled split would leak future
+    information from later days of the same cell into the training fold.
+
+    Returns |y - yhat_oof|. If n < 2, returns [nan] so callers can guard on
+    np.isnan().
+    """
+    n = len(X)
+    if n < 2:
+        return np.array([np.nan])
+    n_splits_eff = max(2, min(n_splits, n))
+    oof = np.empty(n, dtype=float)
+    kf = KFold(n_splits=n_splits_eff, shuffle=False)
+    for tr, te in kf.split(X):
+        m = model_factory()
+        m.fit(X.iloc[tr], y.iloc[tr])
+        oof[te] = m.predict(X.iloc[te])
+    return np.abs(oof - y.values)
+
+
+def _threshold(residuals: np.ndarray, absolute_floor: float) -> float:
+    """
+    Compute the alert threshold from OOF residuals.
+
+    Layered decision: max(alert-level, dynamic-floor, absolute-floor).
+    The alert level is the primary criterion; the two floors are guardrails
+    that only activate when the model is unusually precise.
+    """
+    if residuals.size == 0 or np.isnan(residuals).all():
+        return absolute_floor
+    alert_level = float(np.percentile(residuals, RESIDUAL_ALERT_QUANTILE * 100))
+    dynamic_floor = float(np.percentile(residuals, RESIDUAL_FLOOR_QUANTILE * 100))
+    return max(alert_level, dynamic_floor, absolute_floor)
+
+def _find_cohort_plateau(
+    t80_metrics: pd.DataFrame,
+    windows: tuple,
+) -> Tuple[List[float], set]:
+    """
+    Find the longest consecutive run of burn-in windows that produce the
+    same survivor cohort.
+
+    The plateau is a structural property of the dataset, independent of any
+    model or metric: it identifies the range of burn-in values beyond which
+    adding more days does not change which cells survive. Within that range
+    the choice of burn-in is not critical; outside of it, the cohort is
+    still evolving and the choice would be arbitrary.
+
+    Returns (plateau_windows, cohort_set).
+    """
+    cohorts = {
+        w: set(t80_metrics[t80_metrics['combined_survival_days'] > w].index)
+        for w in windows
+    }
+    sorted_w = sorted(windows)
+    best_run: List[float] = []
+    best_cohort: set = set()
+    current_run: List[float] = [sorted_w[0]]
+    current_cohort = cohorts[sorted_w[0]]
+
+    for w in sorted_w[1:]:
+        if cohorts[w] == current_cohort:
+            current_run.append(w)
+        else:
+            if len(current_run) > len(best_run):
+                best_run, best_cohort = current_run, current_cohort
+            current_run = [w]
+            current_cohort = cohorts[w]
+
+    if len(current_run) > len(best_run):
+        best_run, best_cohort = current_run, current_cohort
+
+    return best_run, best_cohort
+
+
+def _plateau_center(plateau: List[float]) -> float:
+    """
+    Geometric midpoint of the plateau, snapped to the nearest grid value.
+
+    The geometric mean is preferred over the arithmetic mean because burn-in
+    is a multiplicative quantity: the relative difference between 10 and 14
+    is comparable to the relative difference between 14 and 21. Snapping to
+    an actual grid value avoids reporting a burn-in that was never evaluated.
+    """
+    if not plateau:
+        return float("nan")
+    if len(plateau) == 1:
+        return plateau[0]
+    lo, hi = min(plateau), max(plateau)
+    center = math.sqrt(lo * hi) if lo > 0 else (lo + hi) / 2
+    return min(plateau, key=lambda w: abs(w - center))
+
 # ==============================================================================
 # CORE PIPELINE FUNCTIONS
 # ==============================================================================
-def preprocess_telemetry_data(df: pd.DataFrame, irradiance_threshold: float = DAYLIGHT_IRRADIANCE_MIN_W_M2) -> pd.DataFrame:
+def preprocess_telemetry_data(
+    df: pd.DataFrame,
+    irradiance_threshold: float = DAYLIGHT_IRRADIANCE_MIN_W_M2,
+) -> pd.DataFrame:
     """Standardize timestamps, calculate exposure days, and filter night-time data."""
     df_proc = df.reset_index() if df.index.name == "Timestamp" else df.copy()
     df_proc['Datetime'] = pd.to_datetime(df_proc['Timestamp'], utc=True)
     df_proc['Day_Zero'] = df_proc.groupby('cell_name')['Datetime'].transform('min')
-    df_proc['Exposure_Days'] = (df_proc['Datetime'] - df_proc['Day_Zero']).dt.total_seconds() / 86400.0
+    df_proc['Exposure_Days'] = (
+        (df_proc['Datetime'] - df_proc['Day_Zero']).dt.total_seconds() / 86400.0
+    )
     return df_proc[df_proc['POA_Irradiance_W_m2'] > irradiance_threshold].copy()
 
 
@@ -51,71 +177,108 @@ def train_and_evaluate_censored_twin(
     t80_metrics: pd.DataFrame,
     healthy_cells: Optional[List[str]] = None,
     irradiance_threshold: float = DAYLIGHT_IRRADIANCE_MIN_W_M2,
-    burn_in_days: float = BURN_IN_DAYS
+    burn_in_days: float = BURN_IN_DAYS,
 ) -> Tuple[pd.DataFrame, Dict[str, float], List[str], Dict[str, Any]]:
     """Train the Dual Digital Twin (PCE & pFF) exclusively on the mature phase of healthy cells."""
     logger.info(f"Initializing Early Screening (Burn-in Gate: {burn_in_days} days)")
 
     df_daylight = preprocess_telemetry_data(df, irradiance_threshold)
     df_daylight = df_daylight.merge(
-        t80_metrics[['PCE_initial', 'combined_survival_days']], 
-        left_on='cell_name', right_index=True, how='inner'
+        t80_metrics[['PCE_initial', 'combined_survival_days']],
+        left_on='cell_name', right_index=True, how='inner',
     )
 
     if healthy_cells is None:
-        healthy_cells = t80_metrics[t80_metrics['combined_survival_days'] > burn_in_days].index.tolist()
+        healthy_cells = t80_metrics[
+            t80_metrics['combined_survival_days'] > burn_in_days
+        ].index.tolist()
         logger.info(f"Auto-detected healthy cohort: {healthy_cells}")
 
-    df_censored = df_daylight[df_daylight['Exposure_Days'] <= df_daylight['combined_survival_days']].copy()
-    df_censored = df_censored.dropna(subset=FEATURES + ['PCE', 'pFF', 'PCE_initial']).reset_index(drop=True)
-    df_censored['PCE_Relative'] = df_censored['PCE'] / df_censored['PCE_initial'].clip(lower=PCE_INITIAL_REF_FLOOR)
+    df_censored = df_daylight[
+        df_daylight['Exposure_Days'] <= df_daylight['combined_survival_days']
+    ].copy()
+    df_censored = df_censored.dropna(
+        subset=FEATURES + ['PCE', 'pFF', 'PCE_initial']
+    ).reset_index(drop=True)
+    df_censored['PCE_Relative'] = (
+        df_censored['PCE'] / df_censored['PCE_initial'].clip(lower=PCE_INITIAL_REF_FLOOR)
+    )
 
-    train_mask = (df_censored['cell_name'].isin(healthy_cells)) & (df_censored['Exposure_Days'] > burn_in_days)
+    train_mask = (
+        df_censored['cell_name'].isin(healthy_cells)
+        & (df_censored['Exposure_Days'] > burn_in_days)
+    )
     X_train = df_censored.loc[train_mask, FEATURES]
-    
+    y_train_pce = df_censored.loc[train_mask, 'PCE_Relative']
+    y_train_pff = df_censored.loc[train_mask, 'pFF']
+
     models = {
-        'pce': xgb.XGBRegressor(**XGB_PCE_PARAMS).fit(X_train, df_censored.loc[train_mask, 'PCE_Relative']),
-        'pff': xgb.XGBRegressor(**XGB_PFF_PARAMS).fit(X_train, df_censored.loc[train_mask, 'pFF'])
+        'pce': xgb.XGBRegressor(**XGB_PCE_PARAMS).fit(X_train, y_train_pce),
+        'pff': xgb.XGBRegressor(**XGB_PFF_PARAMS).fit(X_train, y_train_pff),
     }
 
     df_censored['Twin_PCE_Pred_Relative'] = models['pce'].predict(df_censored[FEATURES])
     df_censored['Twin_pFF_Pred'] = models['pff'].predict(df_censored[FEATURES])
-    df_censored['Twin_PCE_Pred'] = df_censored['Twin_PCE_Pred_Relative'] * df_censored['PCE_initial']
-    
-    df_censored['Underperformance_PCE'] = df_censored['Twin_PCE_Pred_Relative'] - df_censored['PCE_Relative']
-    df_censored['Underperformance_pFF'] = df_censored['Twin_pFF_Pred'] - df_censored['pFF']
+    df_censored['Twin_PCE_Pred'] = (
+        df_censored['Twin_PCE_Pred_Relative'] * df_censored['PCE_initial']
+    )
 
-    # Thresholds calculation In-Sample
-    res_pce = np.abs(models['pce'].predict(X_train) - df_censored.loc[train_mask, 'PCE_Relative'])
-    res_pff = np.abs(models['pff'].predict(X_train) - df_censored.loc[train_mask, 'pFF'])
-    
-    alert_percentile = RESIDUAL_ALERT_QUANTILE * 100
+    df_censored['Underperformance_PCE'] = (
+        df_censored['Twin_PCE_Pred_Relative'] - df_censored['PCE_Relative']
+    )
+    df_censored['Underperformance_pFF'] = (
+        df_censored['Twin_pFF_Pred'] - df_censored['pFF']
+    )
+
+    # Thresholds from OOF residuals: honest estimate of generalization error.
+    res_pce = oof_abs_residuals(
+        lambda: xgb.XGBRegressor(**XGB_PCE_PARAMS), X_train, y_train_pce,
+    )
+    res_pff = oof_abs_residuals(
+        lambda: xgb.XGBRegressor(**XGB_PFF_PARAMS), X_train, y_train_pff,
+    )
+
     thresholds = {
-        'pce': max(float(np.percentile(res_pce, alert_percentile)) if len(res_pce) > 0 else MIN_PHYSICAL_MAE_PCE, MIN_PHYSICAL_MAE_PCE),
-        'pff': max(float(np.percentile(res_pff, alert_percentile)) if len(res_pff) > 0 else MIN_PHYSICAL_MAE_PFF, MIN_PHYSICAL_MAE_PFF)
+        'pce': _threshold(res_pce, MIN_PHYSICAL_MAE_PCE_ABSOLUTE),
+        'pff': _threshold(res_pff, MIN_PHYSICAL_MAE_PFF_ABSOLUTE),
     }
 
     action_mask = df_censored['Exposure_Days'] <= burn_in_days
     df_censored['Alert_PCE'] = False
     df_censored['Alert_pFF'] = False
-    df_censored.loc[action_mask, 'Alert_PCE'] = df_censored.loc[action_mask, 'Underperformance_PCE'] > thresholds['pce']
-    df_censored.loc[action_mask, 'Alert_pFF'] = df_censored.loc[action_mask, 'Underperformance_pFF'] > thresholds['pff']
-    df_censored['Digital_Twin_Alert'] = df_censored['Alert_PCE'] | df_censored['Alert_pFF']
+    df_censored.loc[action_mask, 'Alert_PCE'] = (
+        df_censored.loc[action_mask, 'Underperformance_PCE'] > thresholds['pce']
+    )
+    df_censored.loc[action_mask, 'Alert_pFF'] = (
+        df_censored.loc[action_mask, 'Underperformance_pFF'] > thresholds['pff']
+    )
+    df_censored['Digital_Twin_Alert'] = (
+        df_censored['Alert_PCE'] | df_censored['Alert_pFF']
+    )
     df_censored['In_Action_Window'] = action_mask
 
     return df_censored, thresholds, healthy_cells, models
 
 
-def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list, burn_in_days: float = BURN_IN_DAYS) -> pd.DataFrame:
+def execute_loocv_validation(
+    df_censored: pd.DataFrame,
+    healthy_cells: list,
+    burn_in_days: float = BURN_IN_DAYS,
+) -> pd.DataFrame:
     """Perform Leave-One-Out Cross-Validation ensuring strict separation of Test Residuals."""
     loocv_results = []
-    alert_percentile = RESIDUAL_ALERT_QUANTILE * 100
 
     for holdout_cell in healthy_cells:
         train_cells = [c for c in healthy_cells if c != holdout_cell]
 
-        train_mask = (df_censored['cell_name'].isin(train_cells)) & (df_censored['Exposure_Days'] > burn_in_days)
-        early_mask = (df_censored['cell_name'] == holdout_cell) & (df_censored['Exposure_Days'] <= burn_in_days)
+        train_mask = (
+            df_censored['cell_name'].isin(train_cells)
+            & (df_censored['Exposure_Days'] > burn_in_days)
+        )
+        early_mask = (
+            (df_censored['cell_name'] == holdout_cell)
+            & (df_censored['Exposure_Days'] <= burn_in_days)
+        )
 
         X_train = df_censored.loc[train_mask, FEATURES]
         y_train_pce = df_censored.loc[train_mask, 'PCE_Relative']
@@ -131,50 +294,75 @@ def execute_loocv_validation(df_censored: pd.DataFrame, healthy_cells: list, bur
         model_pce = xgb.XGBRegressor(**XGB_PCE_PARAMS).fit(X_train, y_train_pce)
         model_pff = xgb.XGBRegressor(**XGB_PFF_PARAMS).fit(X_train, y_train_pff)
 
-        # 1. THRESHOLD INTEGRITY: Calculated strictly on the IN-SAMPLE training data
-        res_train_pce = np.abs(model_pce.predict(X_train) - y_train_pce)
-        res_train_pff = np.abs(model_pff.predict(X_train) - y_train_pff)
+        # Thresholds derived from OOF residuals of the fold's training cells,
+        # never from the holdout. See oof_abs_residuals() for the rationale.
+        res_train_pce = oof_abs_residuals(
+            lambda: xgb.XGBRegressor(**XGB_PCE_PARAMS), X_train, y_train_pce,
+        )
+        res_train_pff = oof_abs_residuals(
+            lambda: xgb.XGBRegressor(**XGB_PFF_PARAMS), X_train, y_train_pff,
+        )
 
-        thr_pce = max(float(np.percentile(res_train_pce, alert_percentile)), MIN_PHYSICAL_MAE_PCE)
-        thr_pff = max(float(np.percentile(res_train_pff, alert_percentile)), MIN_PHYSICAL_MAE_PFF)
+        thr_pce = _threshold(res_train_pce, MIN_PHYSICAL_MAE_PCE_ABSOLUTE)
+        thr_pff = _threshold(res_train_pff, MIN_PHYSICAL_MAE_PFF_ABSOLUTE)
 
         # 2. EVALUATION
         if len(X_early) > 0:
             underperf_pce = model_pce.predict(X_early) - np.asarray(y_early_pce)
             underperf_pff = model_pff.predict(X_early) - np.asarray(y_early_pff)
-            
+
             alerts = (underperf_pce > thr_pce) | (underperf_pff > thr_pff)
             alert_pct = (alerts.sum() / len(alerts)) * 100.0
+
+            # Holdout absolute errors, kept as lists so that the caller can
+            # pool them across folds to obtain a single global MAE and SE.
+            abs_errors_pce = np.abs(underperf_pce).tolist()
+            abs_errors_pff = np.abs(underperf_pff).tolist()
         else:
             alert_pct = 0.0
+            abs_errors_pce = []
+            abs_errors_pff = []
 
         loocv_results.append({
             'Holdout_Cell': holdout_cell,
-            'Train_MAE_PCE': float(np.mean(res_train_pce)),
-            'Train_MAE_pFF': float(np.mean(res_train_pff)),
+            'OOF_MAE_PCE': float(np.mean(res_train_pce)),
+            'OOF_MAE_pFF': float(np.mean(res_train_pff)),
+            'Fold_MAE_PCE': float(np.mean(abs_errors_pce)) if abs_errors_pce else np.nan,
+            'Fold_MAE_PFF': float(np.mean(abs_errors_pff)) if abs_errors_pff else np.nan,
             'Action_Window_Points': len(X_early),
             'Alert_Freq_Pct': float(alert_pct),
-            'Validation_Status': 'PASS' if alert_pct <= ALERT_FREQUENCY_THRESHOLD_PCT else 'FAIL'
+            'Validation_Status': 'PASS' if alert_pct <= ALERT_FREQUENCY_THRESHOLD_PCT else 'FAIL',
+            'Abs_Errors_PCE': abs_errors_pce,
+            'Abs_Errors_PFF': abs_errors_pff,
         })
 
-    return pd.DataFrame(loocv_results).round(4)
+    df = pd.DataFrame(loocv_results)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].round(4)
+    return df
 
 
 # ==============================================================================
 # DIAGNOSTICS & STATUS GENERATION
 # ==============================================================================
-def generate_diagnostic_summary(df_twin: pd.DataFrame, t80_metrics: pd.DataFrame, burn_in_days: float = BURN_IN_DAYS) -> pd.DataFrame:
+def generate_diagnostic_summary(
+    df_twin: pd.DataFrame,
+    t80_metrics: pd.DataFrame,
+    burn_in_days: float = BURN_IN_DAYS,
+) -> pd.DataFrame:
     """Generate final status summary aggregating ML alerts and physical T80 limits."""
-    df_action = df_twin[df_twin['Exposure_Days'] <= burn_in_days].copy().sort_values(by=['cell_name', 'Datetime'])
+    df_action = df_twin[df_twin['Exposure_Days'] <= burn_in_days].copy().sort_values(
+        by=['cell_name', 'Datetime']
+    )
     df_action['Cum_Points'] = df_action.groupby('cell_name').cumcount().add(1)
 
     summary = df_action.groupby('cell_name').agg(
         Alert_Count=('Digital_Twin_Alert', 'sum'),
         Alert_PCE_Count=('Alert_PCE', 'sum'),
         Alert_pFF_Count=('Alert_pFF', 'sum'),
-        Data_Points=('PCE', 'count')
+        Data_Points=('PCE', 'count'),
     )
-    
+
     summary['alert_freq_pct'] = (summary['Alert_Count'] / summary['Data_Points']) * 100.0
     summary['alert_pce_pct'] = (summary['Alert_PCE_Count'] / summary['Data_Points']) * 100.0
     summary['alert_pff_pct'] = (summary['Alert_pFF_Count'] / summary['Data_Points']) * 100.0
@@ -182,43 +370,68 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, t80_metrics: pd.DataFrame
     summary = summary.merge(t80_metrics, left_index=True, right_index=True, how='left')
 
     summary['extrinsic_failure'] = (
-        (summary['combined_survival_days'] <= burn_in_days) |
-        (summary['alert_freq_pct'] > ALERT_FREQUENCY_THRESHOLD_PCT)
+        (summary['combined_survival_days'] <= burn_in_days)
+        | (summary['alert_freq_pct'] > ALERT_FREQUENCY_THRESHOLD_PCT)
     )
 
     def get_diagnostic_status(row):
-        if not row['extrinsic_failure']: 
+        if not row['extrinsic_failure']:
             return "Healthy"
-        
-        t80_tags = [t for t, k in [("PCE", 'survival_days_pce'), ("pFF", 'survival_days_pff')] if row.get(k, float('inf')) <= burn_in_days]
-        ml_tags = [t for t, k in [("PCE", 'alert_pce_pct'), ("pFF", 'alert_pff_pct')] if row.get(k, 0) > ALERT_FREQUENCY_THRESHOLD_PCT]
+
+        t80_tags = [
+            t for t, k in [("PCE", 'survival_days_pce'), ("pFF", 'survival_days_pff')]
+            if row.get(k, float('inf')) <= burn_in_days
+        ]
+        ml_tags = [
+            t for t, k in [("PCE", 'alert_pce_pct'), ("pFF", 'alert_pff_pct')]
+            if row.get(k, 0) > ALERT_FREQUENCY_THRESHOLD_PCT
+        ]
 
         parts = []
-        if len(t80_tags) == 2: parts.append("T80(Dual)")
-        elif t80_tags: parts.append(f"T80({t80_tags[0]})")
+        if len(t80_tags) == 2:
+            parts.append("T80(Dual)")
+        elif t80_tags:
+            parts.append(f"T80({t80_tags[0]})")
 
-        if len(ml_tags) == 2: parts.append("ML(Dual)")
-        elif ml_tags: parts.append(f"ML({ml_tags[0]})")
-        elif row.get('alert_freq_pct', 0) > ALERT_FREQUENCY_THRESHOLD_PCT: parts.append("ML(Combined)")
+        if len(ml_tags) == 2:
+            parts.append("ML(Dual)")
+        elif ml_tags:
+            parts.append(f"ML({ml_tags[0]})")
+        elif row.get('alert_freq_pct', 0) > ALERT_FREQUENCY_THRESHOLD_PCT:
+            parts.append("ML(Combined)")
 
         return " + ".join(parts) if parts else "Unknown"
 
     summary['Diagnostic_Status'] = summary.apply(get_diagnostic_status, axis=1)
 
-    df_action['Cum_Alert_Pct'] = (df_action.groupby('cell_name')['Digital_Twin_Alert'].cumsum() / df_action['Cum_Points']) * 100.0
-    valid_crossings = df_action[(df_action['Cum_Alert_Pct'] > ALERT_FREQUENCY_THRESHOLD_PCT) & (df_action['Cum_Points'] >= 100)]
+    df_action['Cum_Alert_Pct'] = (
+        df_action.groupby('cell_name')['Digital_Twin_Alert'].cumsum()
+        / df_action['Cum_Points']
+    ) * 100.0
+    valid_crossings = df_action[
+        (df_action['Cum_Alert_Pct'] > ALERT_FREQUENCY_THRESHOLD_PCT)
+        & (df_action['Cum_Points'] >= 100)
+    ]
     time_alert_day = valid_crossings.groupby('cell_name')['Exposure_Days'].min()
-    summary['threshold_pct_day'] = np.where(summary['alert_freq_pct'] > ALERT_FREQUENCY_THRESHOLD_PCT, time_alert_day.reindex(summary.index).to_numpy(), np.nan)
+    summary['threshold_pct_day'] = np.where(
+        summary['alert_freq_pct'] > ALERT_FREQUENCY_THRESHOLD_PCT,
+        time_alert_day.reindex(summary.index).to_numpy(),
+        np.nan,
+    )
 
     cols_to_keep = [
-        'extrinsic_failure', 'Diagnostic_Status', 'alert_freq_pct', 'alert_pce_pct', 'alert_pff_pct',
+        'extrinsic_failure', 'Diagnostic_Status', 'alert_freq_pct',
+        'alert_pce_pct', 'alert_pff_pct',
         'combined_survival_days', 'threshold_pct_day',
         'survival_days_pce', 't80_failure_date_pce',
         'survival_days_pff', 't80_failure_date_pff',
         'combined_failure_date', 'PCE_initial', 'pFF_initial',
-        'T80_threshold_PCE', 'T80_threshold_pFF'
+        'T80_threshold_PCE', 'T80_threshold_pFF',
     ]
-    return summary[[c for c in cols_to_keep if c in summary.columns]].sort_values(by='alert_freq_pct', ascending=False)
+    return summary[[c for c in cols_to_keep if c in summary.columns]].sort_values(
+        by='alert_freq_pct', ascending=False
+    )
+
 
 # ==============================================================================
 # PHASE 1: GRID SEARCH
@@ -226,44 +439,103 @@ def generate_diagnostic_summary(df_twin: pd.DataFrame, t80_metrics: pd.DataFrame
 def run_burn_in_grid_search(
     df: pd.DataFrame,
     t80_metrics: pd.DataFrame,
-    windows: tuple[float, ...] = BURN_IN_GRID_WINDOWS,
+    windows: tuple = BURN_IN_GRID_WINDOWS,
 ) -> pd.DataFrame:
-    """PHASE 1: Sensitivity analysis to empirically determine the end of the burn-in phase."""
+    """
+    Phase 1: identify the structural cohort plateau of the burn-in gate.
+
+    The winner is NOT chosen by MAE. MAE is reported as validation only.
+    The selection rule is:
+        1. Compute the survivor cohort for every candidate W.
+        2. Find the longest run of consecutive W with the same cohort.
+        3. Select the geometric midpoint of that plateau.
+    This avoids circularity (W chosen by a metric that depends on W) and
+    the small-cohort artifact (tiny cohorts trivially achieve low MAE
+    because they exclude the difficult cells).
+    """
     print("\n" + "=" * 80)
-    print(" PHASE 1: BURN-IN GRID SEARCH (Sensitivity Analysis)")
+    print(" PHASE 1: BURN-IN GRID SEARCH (Structural Cohort Plateau)")
     print("=" * 80)
 
     results = []
     for w in windows:
-        # COHORTE DINÁMICA: Celdas que sobreviven más que la ventana candidata w
         cohort_w = t80_metrics[t80_metrics['combined_survival_days'] > w].index.tolist()
-        
+
         if len(cohort_w) < 2:
-            logger.warning(f"Window {w}d leaves too few healthy cells (N={len(cohort_w)}). Skipping.")
+            logger.warning(
+                f"Window {w}d leaves too few healthy cells (N={len(cohort_w)}). Skipping."
+            )
             continue
 
         print(f"\n>>> Evaluating candidate window: {w} days (Cohort N={len(cohort_w)}): {cohort_w}")
         try:
-            df_twin, thresholds, _, _ = train_and_evaluate_censored_twin(df, t80_metrics, healthy_cells=cohort_w, burn_in_days=w)
+            df_twin, thresholds, _, _ = train_and_evaluate_censored_twin(
+                df, t80_metrics, healthy_cells=cohort_w, burn_in_days=w,
+            )
             loocv_df = execute_loocv_validation(df_twin, cohort_w, burn_in_days=w)
 
-            mean_mae_pce = loocv_df['Train_MAE_PCE'].mean() if 'Train_MAE_PCE' in loocv_df.columns else np.nan
-            mean_mae_pff = loocv_df['Train_MAE_pFF'].mean() if 'Train_MAE_pFF' in loocv_df.columns else np.nan
+            # MAE pooled from holdout errors is reported for VALIDATION only.
+            # It is NOT the selection criterion.
+            per_fold_pce = loocv_df['Fold_MAE_PCE'].dropna().to_numpy()
+            per_fold_pff = loocv_df['Fold_MAE_PFF'].dropna().to_numpy()
+
+            n_folds_pce, n_folds_pff = len(per_fold_pce), len(per_fold_pff)
+            # MAE reported as the mean of per-fold MAEs (mean-of-means), so
+            # every cell contributes equally regardless of how many action-
+            # window points it has. This is the honest generalization metric.
+            mae_pce = float(np.mean(per_fold_pce)) if n_folds_pce > 0 else np.nan
+            mae_pff = float(np.mean(per_fold_pff)) if n_folds_pff > 0 else np.nan
+            # SE across folds (cells), not across points. Points within a
+            # cell are not independent, so the point-level SE would under-
+            # estimate the true uncertainty by 1-2 orders of magnitude.
+            se_pce = (
+                float(np.std(per_fold_pce, ddof=1) / np.sqrt(n_folds_pce))
+                if n_folds_pce > 1 else np.nan
+            )
+            se_pff = (
+                float(np.std(per_fold_pff, ddof=1) / np.sqrt(n_folds_pff))
+                if n_folds_pff > 1 else np.nan
+            )
 
             results.append({
                 'Window_Days': w,
                 'Healthy_Cells_N': len(cohort_w),
+                'N_Folds_PCE': n_folds_pce,
+                'N_Folds_pFF': n_folds_pff,
                 'Q98_PCE_Raw': thresholds.get('pce', np.nan),
                 'Q98_pFF_Raw': thresholds.get('pff', np.nan),
-                'LOOCV_MAE_PCE': mean_mae_pce,
-                'LOOCV_MAE_pFF': mean_mae_pff
+                'MAE_PCE': mae_pce,
+                'SE_PCE': se_pce,
+                'MAE_pFF': mae_pff,
+                'SE_pFF': se_pff,
             })
         except Exception as e:
             logger.error(f"Error evaluating window of {w} days: {e}")
 
     df_results = pd.DataFrame(results).round(4)
-    print("\n[GRID SEARCH RESULTS - STABILIZATION (DYNAMIC COHORT)]")
+
+    # --- Structural selection ---------------------------------------------
+    plateau, plateau_cohort = _find_cohort_plateau(t80_metrics, windows)
+    selected_w = _plateau_center(plateau)
+
+    df_results['In_Plateau'] = df_results['Window_Days'].isin(plateau)
+    df_results['Is_Selected'] = df_results['Window_Days'] == selected_w
+    df_results = df_results.sort_values('Window_Days').reset_index(drop=True)
+
+    print("\n[GRID SEARCH RESULTS]")
     print(df_results.to_string(index=False))
+
+    print(
+        f"\n[PLATEAU] W ∈ {plateau} "
+        f"(structural selection, N={len(plateau_cohort)} cells)"
+    )
+    if not df_results.empty and df_results['Is_Selected'].any():
+        sel = df_results[df_results['Is_Selected']].iloc[0]
+        print(
+            f"[SELECTED] W={selected_w:.0f}d — geometric midpoint of the "
+            f"plateau. MAE_PCE={sel['MAE_PCE']:.4f} "
+            f"(reported for validation, not used for selection)."
+        )
     return df_results
 
 
@@ -272,10 +544,10 @@ def run_burn_in_grid_search(
 # ==============================================================================
 def main():
     from src.config import (
-    FILE_MERGED_FEATURES,
-    FILE_T80_TRUTH,
-    FILE_HEALTHY_COHORT,
-    FILE_SCREENING_ARTIFACTS,
+        FILE_MERGED_FEATURES,
+        FILE_T80_TRUTH,
+        FILE_HEALTHY_COHORT,
+        FILE_SCREENING_ARTIFACTS,
     )
 
     FILE_HEALTHY_COHORT.parent.mkdir(parents=True, exist_ok=True)
@@ -294,26 +566,46 @@ def main():
     grid_results.to_parquet(grid_parquet_path, engine='pyarrow')
     logger.info(f"Grid search results exported to: {grid_parquet_path.name}")
 
+    if not grid_results.empty and grid_results['Is_Selected'].any():
+        selected_w = float(
+            grid_results.loc[grid_results['Is_Selected'], 'Window_Days'].iloc[0]
+        )
+        if abs(selected_w - BURN_IN_DAYS) > 1e-6:
+            logger.warning(
+                f"Structural plateau selects W={selected_w:.0f}d, but "
+                f"BURN_IN_DAYS={BURN_IN_DAYS:.0f}d. Update config.py to "
+                f"align the pipeline with the empirical evidence."
+            )
+
     # PHASE 2: PRODUCTION
     print(f"\nInitializing Phase 2 (Production) with optimal window: {BURN_IN_DAYS} days")
 
     # 1. Initial Screening Model
     df_twin_p1, _, screening_cohort, _ = train_and_evaluate_censored_twin(
-        df_final, t80_metrics, burn_in_days=BURN_IN_DAYS
+        df_final, t80_metrics, burn_in_days=BURN_IN_DAYS,
     )
 
-    initial_summary = generate_diagnostic_summary(df_twin_p1, t80_metrics, burn_in_days=BURN_IN_DAYS)
-    
+    initial_summary = generate_diagnostic_summary(
+        df_twin_p1, t80_metrics, burn_in_days=BURN_IN_DAYS,
+    )
+
     # 2. Extract cells that physically failed during burn-in
-    failed_physical = initial_summary[initial_summary['combined_survival_days'] <= BURN_IN_DAYS].index.tolist()
+    failed_physical = initial_summary[
+        initial_summary['combined_survival_days'] <= BURN_IN_DAYS
+    ].index.tolist()
     physical_survivors = [c for c in screening_cohort if c not in failed_physical]
     print(f"\n[PHYSICAL GATE] Evicted due to early T80 death: {failed_physical}")
-    
+
     # 3. Leave-One-Out Cross-Validation on physical survivors to catch ML anomalies
-    loocv_screening = execute_loocv_validation(df_twin_p1, physical_survivors, burn_in_days=BURN_IN_DAYS)
-    failed_by_loocv = loocv_screening.loc[loocv_screening['Alert_Freq_Pct'] > ALERT_FREQUENCY_THRESHOLD_PCT, 'Holdout_Cell'].tolist()
+    loocv_screening = execute_loocv_validation(
+        df_twin_p1, physical_survivors, burn_in_days=BURN_IN_DAYS,
+    )
+    failed_by_loocv = loocv_screening.loc[
+        loocv_screening['Alert_Freq_Pct'] > ALERT_FREQUENCY_THRESHOLD_PCT,
+        'Holdout_Cell',
+    ].tolist()
     print(f"[LOOCV GATE] Evicted due to ML Anomalies: {failed_by_loocv}")
-    
+
     # 4. Define final production cohort
     failed = list(set(failed_physical + failed_by_loocv))
     production_cohort = [c for c in screening_cohort if c not in failed]
@@ -321,10 +613,12 @@ def main():
 
     # 5. Final Production Training
     df_twin_final, final_thresholds, _, dt_models_final = train_and_evaluate_censored_twin(
-        df_final, t80_metrics, healthy_cells=production_cohort, burn_in_days=BURN_IN_DAYS
+        df_final, t80_metrics, healthy_cells=production_cohort, burn_in_days=BURN_IN_DAYS,
     )
 
-    summary_table = generate_diagnostic_summary(df_twin_final, t80_metrics, burn_in_days=BURN_IN_DAYS)
+    summary_table = generate_diagnostic_summary(
+        df_twin_final, t80_metrics, burn_in_days=BURN_IN_DAYS,
+    )
     print("\n--- Final Diagnostic Summary ---")
     print(summary_table.to_string())
 
@@ -336,11 +630,23 @@ def main():
         "healthy_cohort": production_cohort,
         "alert_thresholds": final_thresholds,
         "model_pce": dt_models_final['pce'],
-        "model_pff": dt_models_final['pff']
+        "model_pff": dt_models_final['pff'],
+        # ---- Downstream contract (v2) --------------------------------
+        # t80_target_metric declares WHICH survival column downstream
+        # modules must use as ground truth for RUL forecasting. The gate
+        # uses 'combined_survival_days' for conservatism, but the RUL
+        # engine models physical PCE damage, so its target is PCE-based.
+        # t80_target_days is the pre-computed dict {cell: days} so that
+        # downstream modules do not have to re-derive it from t80_metrics.
+        "schema_version": 2,
+        "t80_target_metric": "survival_days_pce",
+        "t80_target_days": summary_table["survival_days_pce"].to_dict(),
+        "gate_metric": "combined_survival_days",
     }, FILE_SCREENING_ARTIFACTS)
 
     df_twin_final.to_parquet(FILE_HEALTHY_COHORT, engine='pyarrow')
     logger.info("Pipeline execution completed successfully.")
+
 
 if __name__ == "__main__":
     main()
