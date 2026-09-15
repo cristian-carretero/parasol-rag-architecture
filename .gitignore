@@ -12,9 +12,18 @@ data/
 # Generated figures — heavy, regenerable from the pipeline
 outputs/figures/
 
-# Diagnostics (JSON rule trees, audit summaries) are versioned:
-# they are small text reports and serve as a historical reference of each run.
-# No ignore rule needed for outputs/diagnostics/.
+# Diagnostics — versioned by default (small text artifacts represent
+# historical decisions: calibrated coefficients, audit summaries).
+#
+# Exception: per-cell forensic audits under cell_diagnosis/ can grow
+# linearly with the number of audited cells, and their .parquet/.log
+# outputs are regenerable via `python -m src.audit_cell_diagnosis`.
+# We ignore those to keep the repository size bounded.
+#
+# IMPORTANT: outputs/diagnostics/**/*.json and *.txt are NOT ignored —
+# the calibrated coefficient JSONs are inputs for modules 08 and 09.
+outputs/diagnostics/cell_diagnosis/**/*.parquet
+outputs/diagnostics/cell_diagnosis/**/*.log
 
 # System or IDE files
 .DS_Store

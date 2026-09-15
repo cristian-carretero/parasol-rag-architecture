@@ -34,7 +34,7 @@ from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_RUL_DIR,
 )
 
 # ------------------------------------------------------------------------------
@@ -54,8 +54,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("RUL-Temporal-Baseline")
 
-REPORT_PATH = DIAGNOSTICS_DIR / "rul_temporal_baseline.txt"
-RESULTS_PATH = DIAGNOSTICS_DIR / "rul_temporal_baseline.parquet"
+REPORT_PATH = DIAGNOSTICS_RUL_DIR / "rul_temporal_baseline.txt"
+RESULTS_PATH = DIAGNOSTICS_RUL_DIR / "rul_temporal_baseline.parquet"
 
 
 class _Tee:

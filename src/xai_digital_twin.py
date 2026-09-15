@@ -29,7 +29,7 @@ from src.config import (
     XAI_PHYSICAL_FEATURES,
     FILE_HEALTHY_COHORT,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,       
+    DIAGNOSTICS_XAI_DIR,       
     FIGURES_XAI_DIR,       
 )
 
@@ -198,7 +198,7 @@ def extract_twin_surrogate(cell_data: pd.DataFrame, alert_day: float) -> dict[st
 
 
 def main() -> None:
-    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_XAI_DIR.mkdir(parents=True, exist_ok=True)
     SHAP_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if not FILE_HEALTHY_COHORT.exists() or not FILE_SCREENING_ARTIFACTS.exists():
@@ -243,7 +243,7 @@ def main() -> None:
         if report:
             report_dict[str(cell)] = report
 
-    out_file = DIAGNOSTICS_DIR / "twin_surrogate_rules.json"
+    out_file = DIAGNOSTICS_XAI_DIR / "twin_surrogate_rules.json"
     with open(out_file, "w") as f:
         json.dump(report_dict, f, indent=4)
 

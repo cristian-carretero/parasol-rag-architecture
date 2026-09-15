@@ -34,6 +34,19 @@ FIGURES_SCREENING_DIR = FIGURES_DIR / "screening"
 FIGURES_XAI_DIR = FIGURES_DIR / "xai"
 FIGURES_RUL_DIR = FIGURES_DIR / "rul"
 
+# ---------------------------------------------------------------------------
+# Per-module diagnostic subdirectories.
+# The diagnostics root used to be a flat dump that mixed outputs from every
+# pipeline stage (07, 08, 09, XAI, forensic audits). Organising them by
+# producing module keeps the top-level directory navigable as the number of
+# artifacts grows and makes cleanup / archiving per stage trivial.
+# ---------------------------------------------------------------------------
+DIAGNOSTICS_SCREENING_DIR = DIAGNOSTICS_DIR / "screening"           # module 07
+DIAGNOSTICS_RUL_DIR = DIAGNOSTICS_DIR / "rul"                       # module 08
+DIAGNOSTICS_TRAJECTORY_DIR = DIAGNOSTICS_DIR / "trajectory"         # module 09
+DIAGNOSTICS_XAI_DIR = DIAGNOSTICS_DIR / "xai"                       # surrogate rules
+DIAGNOSTICS_CELL_DIAGNOSIS_DIR = DIAGNOSTICS_DIR / "cell_diagnosis" # forensic audits
+
 # ==========================================
 # PIPELINE ARTIFACT PATHS (per module)
 # ==========================================
@@ -105,7 +118,7 @@ FILE_RUL_TARGETS = DIR_RUL / "08_mppt_rul_targets.parquet"
 # Consolidated RUL target per cell: {cell_name, last_anchor_day,
 # rul_pred_days, true_survival_days}.
 
-FILE_RUL_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "rul_coeffs_calibrated.json"
+FILE_RUL_COEFFS_CALIBRATED = DIAGNOSTICS_RUL_DIR / "rul_coeffs_calibrated.json"
 # Optimized kinematic coefficients (written by rul_calibration_optimizer.py).
 # When present, the 08 module loads these instead of the hardcoded baselines.
 
@@ -127,7 +140,7 @@ FILE_TRAJECTORY_PRODUCTION = DIR_RUL / "09_trajectory_production.parquet"
 # Production trajectories: model trained on 100% of cohort, API-calibrated weather.
 # Columns: cell_name, Date_Day, Exposure_Days, Actual_*, Pred_*.
 
-FILE_TRAJECTORY_COEFFS_CALIBRATED = DIAGNOSTICS_DIR / "trajectory_coeffs_calibrated.json"
+FILE_TRAJECTORY_COEFFS_CALIBRATED = DIAGNOSTICS_TRAJECTORY_DIR / "trajectory_coeffs_calibrated.json"
 # Per-parameter k_blend calibrated by trajectory_calibration_optimizer.py.
 # When present, the 09 module loads these instead of the hardcoded defaults.
 

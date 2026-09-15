@@ -51,7 +51,7 @@ from src.config import (
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
     FILE_RUL_COEFFS_CALIBRATED,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_RUL_DIR,
 )
 
 # ------------------------------------------------------------------------------
@@ -94,9 +94,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("RUL-Calib-Optimizer")
 
-REPORT_PATH = DIAGNOSTICS_DIR / "rul_coeffs_optimization.txt"
-SENSITIVITY_PATH = DIAGNOSTICS_DIR / "rul_coeffs_sensitivity.parquet"
-SEARCH_PATH = DIAGNOSTICS_DIR / "rul_coeffs_search.parquet"
+REPORT_PATH = DIAGNOSTICS_RUL_DIR / "rul_coeffs_optimization.txt"
+SENSITIVITY_PATH = DIAGNOSTICS_RUL_DIR / "rul_coeffs_sensitivity.parquet"
+SEARCH_PATH = DIAGNOSTICS_RUL_DIR / "rul_coeffs_search.parquet"
 CALIBRATED_COEFFS_PATH = FILE_RUL_COEFFS_CALIBRATED
 
 
@@ -879,7 +879,7 @@ def _run() -> None:
     df_window = sweep_smoothing_window(
         df_twin, healthy_cohort, t80_metrics, df_api_raw,
     )
-    WINDOW_SWEEP_PATH = DIAGNOSTICS_DIR / "rul_smoothing_window_sweep.parquet"
+    WINDOW_SWEEP_PATH = DIAGNOSTICS_RUL_DIR / "rul_smoothing_window_sweep.parquet"
     df_window.to_parquet(WINDOW_SWEEP_PATH, index=False)
     print(f"\n  Smoothing-window sweep saved -> {WINDOW_SWEEP_PATH}")
 

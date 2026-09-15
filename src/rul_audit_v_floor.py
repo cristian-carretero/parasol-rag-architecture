@@ -35,7 +35,7 @@ from src.config import (
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
     FILE_RUL_COEFFS_CALIBRATED,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_RUL_DIR,
 )
 from src.rul_calibration_optimizer import (
     precompute_units,
@@ -51,8 +51,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Audit-vFloor")
 
-REPORT_PATH = DIAGNOSTICS_DIR / "audit_v_floor.txt"
-TABLE_PATH  = DIAGNOSTICS_DIR / "audit_v_floor.parquet"
+REPORT_PATH = DIAGNOSTICS_RUL_DIR / "audit_v_floor.txt"
+TABLE_PATH  = DIAGNOSTICS_RUL_DIR / "audit_v_floor.parquet"
 
 
 class _Tee:

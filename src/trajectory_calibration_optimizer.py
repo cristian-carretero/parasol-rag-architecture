@@ -47,7 +47,7 @@ from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_SCREENING_ARTIFACTS,
     FILE_TRAJECTORY_COEFFS_CALIBRATED,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_TRAJECTORY_DIR,
     ANCHOR_DAY,
     EVALUATION_HORIZON,
 )
@@ -68,8 +68,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Trajectory-Calib-Optimizer")
 
-REPORT_PATH = DIAGNOSTICS_DIR / "trajectory_coeffs_optimization.txt"
-SENSITIVITY_PATH = DIAGNOSTICS_DIR / "trajectory_k_sensitivity.parquet"
+REPORT_PATH = DIAGNOSTICS_TRAJECTORY_DIR / "trajectory_coeffs_optimization.txt"
+SENSITIVITY_PATH = DIAGNOSTICS_TRAJECTORY_DIR / "trajectory_k_sensitivity.parquet"
 
 
 # ==============================================================================

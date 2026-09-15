@@ -26,7 +26,7 @@ import pandas as pd
 
 from src.config import (
     ALERT_FREQUENCY_THRESHOLD_PCT,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_SCREENING_DIR,
     FILE_SCREENING_ARTIFACTS,
 )
 
@@ -40,7 +40,7 @@ logger = logging.getLogger("GateSensitivity")
 # config is always included and flagged in the output for traceability.
 CANDIDATE_THRESHOLDS = [1.0, 2.0, 5.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0]
 
-OUTPUT_PATH = DIAGNOSTICS_DIR / "07_gate_threshold_sensitivity.parquet"
+OUTPUT_PATH = DIAGNOSTICS_SCREENING_DIR / "07_gate_threshold_sensitivity.parquet"
 
 
 def load_artifacts() -> dict:

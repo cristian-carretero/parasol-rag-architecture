@@ -62,7 +62,7 @@ from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_RUL_DIR,
 )
 
 # ------------------------------------------------------------------------------
@@ -93,7 +93,7 @@ OVERFIT_GAP_RATIO = 0.30
 VERDICT_THRESHOLDS = {"weak": 3.0, "real": 10.0}
 
 # Auto-export path for the human-readable audit report.
-AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "xgb_audit_summary.txt"
+AUDIT_REPORT_PATH: Path = DIAGNOSTICS_RUL_DIR / "xgb_audit_summary.txt"
 
 SCORING = {
     "MAE": make_scorer(mean_absolute_error, greater_is_better=False),

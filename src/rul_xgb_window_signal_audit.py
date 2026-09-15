@@ -56,7 +56,7 @@ from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_RUL_DIR,
 )
 
 # ------------------------------------------------------------------------------
@@ -76,8 +76,8 @@ build_rul_matrix = rul.build_rul_matrix
 SMOOTHING_WINDOW_GRID: list[int] = [1, 2, 3, 5, 7, 10, 14]
 N_SPLITS: int = 5
 
-REPORT_PATH = DIAGNOSTICS_DIR / "rul_xgb_audit_by_window.txt"
-RESULTS_PATH = DIAGNOSTICS_DIR / "rul_xgb_audit_by_window.parquet"
+REPORT_PATH = DIAGNOSTICS_RUL_DIR / "rul_xgb_audit_by_window.txt"
+RESULTS_PATH = DIAGNOSTICS_RUL_DIR / "rul_xgb_audit_by_window.parquet"
 
 logging.basicConfig(
     level=logging.INFO,

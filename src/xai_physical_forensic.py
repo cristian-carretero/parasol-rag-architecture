@@ -25,7 +25,7 @@ from src.config import (
     FILE_HEALTHY_COHORT,
     FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,       
+    DIAGNOSTICS_XAI_DIR,       
 )
 
 logging.basicConfig(
@@ -151,7 +151,7 @@ def _resolve_summary_table(artifacts: dict[str, Any]) -> pd.DataFrame | None:
 
 
 def main() -> None:
-    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_XAI_DIR.mkdir(parents=True, exist_ok=True)
 
     if not FILE_HEALTHY_COHORT.exists() or not FILE_SCREENING_ARTIFACTS.exists():
         logger.error(
@@ -194,7 +194,7 @@ def main() -> None:
         if report:
             report_dict[str(cell)] = report
 
-    out_file = DIAGNOSTICS_DIR / "forensic_surrogate_rules.json"
+    out_file = DIAGNOSTICS_XAI_DIR / "forensic_surrogate_rules.json"
     with open(out_file, "w") as f:
         json.dump(report_dict, f, indent=4)
 

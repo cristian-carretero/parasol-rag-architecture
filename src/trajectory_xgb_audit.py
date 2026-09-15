@@ -66,7 +66,7 @@ from src.config import (
     XGB_PARAMS_RUL_PCE,
     FILE_HEALTHY_COHORT,
     FILE_SCREENING_ARTIFACTS,
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_TRAJECTORY_DIR,
 )
 
 
@@ -99,7 +99,7 @@ SIGNAL_THRESHOLDS = {"none": 3.0, "weak": 10.0}
 # feature required to consider the target "mean-reverting / autodependent".
 AUTOCORR_MIN = 0.10
 
-AUDIT_REPORT_PATH: Path = DIAGNOSTICS_DIR / "trajectory_audit_summary.txt"
+AUDIT_REPORT_PATH: Path = DIAGNOSTICS_TRAJECTORY_DIR / "trajectory_audit_summary.txt"
 
 SCORING = {
     "MAE": make_scorer(mean_absolute_error, greater_is_better=False),
