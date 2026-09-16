@@ -48,9 +48,9 @@ from src.config import (
     BURN_IN_GRID_WINDOWS,
     DAYLIGHT_IRRADIANCE_MIN_W_M2,
     FEATURES,
+    INITIAL_REF_FLOOR,          
     MIN_PHYSICAL_MAE_PCE_ABSOLUTE,
     MIN_PHYSICAL_MAE_PFF_ABSOLUTE,
-    PCE_INITIAL_REF_FLOOR,
     RESIDUAL_ALERT_QUANTILE,
     RESIDUAL_FLOOR_QUANTILE,
     XGB_PCE_PARAMS,
@@ -233,7 +233,7 @@ def train_and_evaluate_censored_twin(
 
     df_daylight = preprocess_telemetry_data(df, irradiance_threshold)
     df_daylight = df_daylight.merge(
-        t80_metrics[['PCE_initial', 'combined_survival_days']],
+        t80_metrics[['PCE_initial', 'pFF_initial', 'combined_survival_days']],
         left_on='cell_name', right_index=True, how='inner',
     )
 
@@ -247,10 +247,14 @@ def train_and_evaluate_censored_twin(
         df_daylight['Exposure_Days'] <= df_daylight['combined_survival_days']
     ].copy()
     df_censored = df_censored.dropna(
-        subset=FEATURES + ['PCE', 'pFF', 'PCE_initial']
+        subset=FEATURES + ['PCE', 'pFF', 'PCE_initial', 'pFF_initial']
     ).reset_index(drop=True)
+
     df_censored['PCE_Relative'] = (
-        df_censored['PCE'] / df_censored['PCE_initial'].clip(lower=PCE_INITIAL_REF_FLOOR)
+        df_censored['PCE'] / df_censored['PCE_initial'].clip(lower=INITIAL_REF_FLOOR)
+    )
+    df_censored['pFF_Relative'] = (
+        df_censored['pFF'] / df_censored['pFF_initial'].clip(lower=INITIAL_REF_FLOOR)
     )
 
     train_mask = (
@@ -259,7 +263,7 @@ def train_and_evaluate_censored_twin(
     )
     X_train = df_censored.loc[train_mask, FEATURES]
     y_train_pce = df_censored.loc[train_mask, 'PCE_Relative']
-    y_train_pff = df_censored.loc[train_mask, 'pFF']
+    y_train_pff = df_censored.loc[train_mask, 'pFF_Relative'] 
 
     models = {
         'pce': xgb.XGBRegressor(**XGB_PCE_PARAMS).fit(X_train, y_train_pce),
@@ -267,16 +271,15 @@ def train_and_evaluate_censored_twin(
     }
 
     df_censored['Twin_PCE_Pred_Relative'] = models['pce'].predict(df_censored[FEATURES])
-    df_censored['Twin_pFF_Pred'] = models['pff'].predict(df_censored[FEATURES])
-    df_censored['Twin_PCE_Pred'] = (
-        df_censored['Twin_PCE_Pred_Relative'] * df_censored['PCE_initial']
-    )
+    df_censored['Twin_pFF_Pred_Relative'] = models['pff'].predict(df_censored[FEATURES])
+    df_censored['Twin_PCE_Pred'] = (df_censored['Twin_PCE_Pred_Relative'] * df_censored['PCE_initial'])
+    df_censored['Twin_pFF_Pred'] = (df_censored['Twin_pFF_Pred_Relative'] * df_censored['pFF_initial'])
 
     df_censored['Underperformance_PCE'] = (
         df_censored['Twin_PCE_Pred_Relative'] - df_censored['PCE_Relative']
     )
     df_censored['Underperformance_pFF'] = (
-        df_censored['Twin_pFF_Pred'] - df_censored['pFF']
+        df_censored['Twin_pFF_Pred_Relative'] - df_censored['pFF_Relative']
     )
 
     # Thresholds from OOF residuals: honest estimate of generalization error.
@@ -331,11 +334,11 @@ def execute_loocv_validation(
 
         X_train = df_censored.loc[train_mask, FEATURES]
         y_train_pce = df_censored.loc[train_mask, 'PCE_Relative']
-        y_train_pff = df_censored.loc[train_mask, 'pFF']
+        y_train_pff = df_censored.loc[train_mask, 'pFF_Relative']
 
         X_early = df_censored.loc[early_mask, FEATURES]
         y_early_pce = df_censored.loc[early_mask, 'PCE_Relative']
-        y_early_pff = df_censored.loc[early_mask, 'pFF']
+        y_early_pff = df_censored.loc[early_mask, 'pFF_Relative']
 
         if len(X_train) == 0:
             continue
@@ -770,7 +773,7 @@ def main():
         "alert_thresholds": final_thresholds,
         "model_pce": dt_models_final['pce'],
         "model_pff": dt_models_final['pff'],
-        # ---- Downstream contract (v2) --------------------------------
+        # ---- Downstream contract (v3) --------------------------------
         # t80_target_metric declares WHICH survival column downstream
         # modules must use as ground truth for RUL forecasting. The gate
         # uses 'combined_survival_days' for conservatism, but the RUL

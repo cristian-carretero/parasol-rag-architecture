@@ -12,6 +12,14 @@ mature phase):
                   → this is where alerts are actually emitted.
   C (control)   : |residuals| on holdout cell's mature phase (t > W*)
                   → isolates cell-identity generalization from phase.
+
+Target normalization
+--------------------
+Both metrics are normalized by their respective initial reference (PCE_0 and
+pFF_0), matching the screening pipeline. This makes the residual populations
+directly comparable across cells and across phases, and is the reason the
+audit is meaningful: without normalization, the pFF residuals conflate the
+morphological settling of the early phase with genuine model error.
 """
 from __future__ import annotations
 
@@ -19,7 +27,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,7 +38,7 @@ from scipy.stats import ks_2samp
 from src.config import (
     BURN_IN_DAYS, FEATURES, FILE_MERGED_FEATURES, FILE_T80_TRUTH,
     FILE_SCREENING_ARTIFACTS, XGB_PCE_PARAMS, XGB_PFF_PARAMS,
-    FIGURES_SCREENING_DIR,
+    FIGURES_SCREENING_DIR, INITIAL_REF_FLOOR,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -48,6 +56,35 @@ preprocess_telemetry_data = _screening.preprocess_telemetry_data
 oof_abs_residuals = _screening.oof_abs_residuals
 
 
+# ==============================================================================
+# STATISTICAL HELPERS
+# ==============================================================================
+from typing import Any, cast
+
+def _ks_dict(A: np.ndarray, B: np.ndarray) -> Optional[Dict[str, float]]:
+    """
+    Run a two-sample Kolmogorov-Smirnov test and return {stat, p}.
+
+    Tolerates both the modern KstestResult API (scipy >= 1.9, exposes
+    .statistic and .pvalue) and the legacy tuple API (returns a
+    (statistic, pvalue) pair). The intermediate values are explicitly
+    typed as Any so that static type checkers do not attempt to narrow
+    them into the incompatible `tuple | Any | None` union that scipy's
+    incomplete stubs produce.
+    """
+    if not (A.size and B.size):
+        return None
+    result = ks_2samp(A, B)
+    stat: Any = getattr(result, "statistic", None)
+    pval: Any = getattr(result, "pvalue", None)
+    if stat is None:  # legacy tuple API
+        stat, pval = result  # type: ignore[misc]
+    return {"stat": float(cast(Any, stat)), "p": float(cast(Any, pval))}
+
+
+# ==============================================================================
+# POPULATION COLLECTION
+# ==============================================================================
 def _collect_populations(
     df: pd.DataFrame,
     t80_metrics: pd.DataFrame,
@@ -57,12 +94,20 @@ def _collect_populations(
     """Rebuild the LOOCV and collect A/B/C residual populations per metric."""
     df_dl = preprocess_telemetry_data(df)
     df_dl = df_dl.merge(
-        t80_metrics[["PCE_initial", "combined_survival_days"]],
+        t80_metrics[["PCE_initial", "pFF_initial", "combined_survival_days"]],
         left_on="cell_name", right_index=True, how="inner",
     )
     df_dl = df_dl[df_dl["Exposure_Days"] <= df_dl["combined_survival_days"]].copy()
-    df_dl = df_dl.dropna(subset=FEATURES + ["PCE", "pFF", "PCE_initial"]).reset_index(drop=True)
-    df_dl["PCE_Relative"] = df_dl["PCE"] / df_dl["PCE_initial"].clip(lower=1e-3)
+    df_dl = df_dl.dropna(
+        subset=FEATURES + ["PCE", "pFF", "PCE_initial", "pFF_initial"]
+    ).reset_index(drop=True)
+
+    df_dl["PCE_Relative"] = (
+        df_dl["PCE"] / df_dl["PCE_initial"].clip(lower=INITIAL_REF_FLOOR)
+    )
+    df_dl["pFF_Relative"] = (
+        df_dl["pFF"] / df_dl["pFF_initial"].clip(lower=INITIAL_REF_FLOOR)
+    )
 
     pops = {m: {"A": [], "B": [], "C": [], "per_cell": {}} for m in ("PCE", "pFF")}
 
@@ -83,30 +128,37 @@ def _collect_populations(
 
         Xtr = df_dl.loc[train_mask, FEATURES]
         ytr_pce = df_dl.loc[train_mask, "PCE_Relative"]
-        ytr_pff = df_dl.loc[train_mask, "pFF"]
+        ytr_pff = df_dl.loc[train_mask, "pFF_Relative"]
 
         m_pce = xgb.XGBRegressor(**XGB_PCE_PARAMS).fit(Xtr, ytr_pce)
         m_pff = xgb.XGBRegressor(**XGB_PFF_PARAMS).fit(Xtr, ytr_pff)
 
         # A: calibration (K-fold OOF on training cells' mature phase).
-        A_pce = oof_abs_residuals(lambda: xgb.XGBRegressor(**XGB_PCE_PARAMS), Xtr, ytr_pce)
-        A_pff = oof_abs_residuals(lambda: xgb.XGBRegressor(**XGB_PFF_PARAMS), Xtr, ytr_pff)
+        A_pce = oof_abs_residuals(
+            lambda: xgb.XGBRegressor(**XGB_PCE_PARAMS), Xtr, ytr_pce
+        )
+        A_pff = oof_abs_residuals(
+            lambda: xgb.XGBRegressor(**XGB_PFF_PARAMS), Xtr, ytr_pff
+        )
 
         # B: application (holdout's early phase).
         Xe = df_dl.loc[early_mask, FEATURES]
         ye_pce = df_dl.loc[early_mask, "PCE_Relative"].to_numpy()
-        ye_pff = df_dl.loc[early_mask, "pFF"].to_numpy()
+        ye_pff = df_dl.loc[early_mask, "pFF_Relative"].to_numpy()
         B_pce = np.abs(ye_pce - m_pce.predict(Xe)) if len(Xe) else np.array([])
         B_pff = np.abs(ye_pff - m_pff.predict(Xe)) if len(Xe) else np.array([])
 
         # C: control (holdout's mature phase).
         Xm = df_dl.loc[mature_mask, FEATURES]
         ym_pce = df_dl.loc[mature_mask, "PCE_Relative"].to_numpy()
-        ym_pff = df_dl.loc[mature_mask, "pFF"].to_numpy()
+        ym_pff = df_dl.loc[mature_mask, "pFF_Relative"].to_numpy()
         C_pce = np.abs(ym_pce - m_pce.predict(Xm)) if len(Xm) else np.array([])
         C_pff = np.abs(ym_pff - m_pff.predict(Xm)) if len(Xm) else np.array([])
 
-        for metric, A, B, C in (("PCE", A_pce, B_pce, C_pce), ("pFF", A_pff, B_pff, C_pff)):
+        for metric, A, B, C in (
+            ("PCE", A_pce, B_pce, C_pce),
+            ("pFF", A_pff, B_pff, C_pff),
+        ):
             if A.size:
                 pops[metric]["A"].append(A)
             if B.size:
@@ -135,12 +187,14 @@ def _collect_populations(
     }
 
 
+# ==============================================================================
+# DESCRIPTIVE SUMMARY
+# ==============================================================================
 def _summarize(A: np.ndarray, B: np.ndarray, C: np.ndarray, label: str) -> dict:
     """Descriptive comparison of the three populations."""
-    def q(x, p): return float(np.percentile(x, p)) if x.size else float("nan")
-    ks_AB = ks_2samp(A, B) if A.size and B.size else None
-    ks_AC = ks_2samp(A, C) if A.size and C.size else None
-    ks_BC = ks_2samp(B, C) if B.size and C.size else None
+    def q(x: np.ndarray, p: float) -> float:
+        return float(np.percentile(x, p)) if x.size else float("nan")
+
     return {
         "label": label,
         "n": {"A": int(A.size), "B": int(B.size), "C": int(C.size)},
@@ -153,13 +207,16 @@ def _summarize(A: np.ndarray, B: np.ndarray, C: np.ndarray, label: str) -> dict:
         "ratio_p98_B_over_C": q(B, 98) / q(C, 98) if B.size and C.size else float("nan"),
         "ratio_p98_C_over_A": q(C, 98) / q(A, 98) if A.size and C.size else float("nan"),
         "ks": {
-            "A_vs_B": {"stat": float(ks_AB.statistic), "p": float(ks_AB.pvalue)} if ks_AB else None,
-            "A_vs_C": {"stat": float(ks_AC.statistic), "p": float(ks_AC.pvalue)} if ks_AC else None,
-            "B_vs_C": {"stat": float(ks_BC.statistic), "p": float(ks_BC.pvalue)} if ks_BC else None,
+            "A_vs_B": _ks_dict(A, B),
+            "A_vs_C": _ks_dict(A, C),
+            "B_vs_C": _ks_dict(B, C),
         },
     }
 
 
+# ==============================================================================
+# PLOTTING
+# ==============================================================================
 def _plot_ecdf(pops: Dict[str, np.ndarray], metric: str, out_path: Path) -> None:
     """ECDF of A, B, C on the same axes, log-x to expose tail behavior."""
     fig, ax = plt.subplots(figsize=(9, 5.5))
@@ -186,6 +243,9 @@ def _plot_ecdf(pops: Dict[str, np.ndarray], metric: str, out_path: Path) -> None
     plt.close(fig)
 
 
+# ==============================================================================
+# MAIN
+# ==============================================================================
 def main() -> None:
     df = pd.read_parquet(FILE_MERGED_FEATURES)
     t80 = pd.read_parquet(FILE_T80_TRUTH)
@@ -227,9 +287,9 @@ def main() -> None:
         print(f"  median: A={s['median']['A']:.4f}  B={s['median']['B']:.4f}  C={s['median']['C']:.4f}")
         print(f"  ratio p98 (B/A) = {s['ratio_p98_B_over_A']:.3f}   "
               f"(B/C) = {s['ratio_p98_B_over_C']:.3f}   (C/A) = {s['ratio_p98_C_over_A']:.3f}")
-        if s["ks"]["A_vs_B"]:
-            print(f"  KS A~B: D={s['ks']['A_vs_B']['stat']:.3f}, "
-                  f"p={s['ks']['A_vs_B']['p']:.2e}")
+        ks_ab = s["ks"]["A_vs_B"]
+        if ks_ab is not None:
+            print(f"  KS A~B: D={ks_ab['stat']:.3f}, p={ks_ab['p']:.2e}")
 
 
 if __name__ == "__main__":

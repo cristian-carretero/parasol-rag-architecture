@@ -155,10 +155,10 @@ CELL_AREA_M2 = 0.64 / 10000.0
 # and excluded from PCE calculation and daylight filtering.
 DAYLIGHT_IRRADIANCE_MIN_W_M2 = 100.0
 
-# Floor applied to PCE_initial before using it as a denominator (e.g.
-# PCE_Relative = PCE / PCE_initial), to avoid blow-ups on a noisy first
-# measurement close to zero.
-PCE_INITIAL_REF_FLOOR = 1e-3
+# Floor applied to initial references (PCE_0, pFF_0) before using them
+# as denominators. Both are strictly positive in practice; the floor is
+# a guard against a pathological first measurement close to zero.
+INITIAL_REF_FLOOR = 1e-3
 
 RANDOM_STATE = 42
 
