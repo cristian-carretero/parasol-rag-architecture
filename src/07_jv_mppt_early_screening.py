@@ -17,6 +17,19 @@ Each threshold is the maximum of three layers:
   - alert level      = RESIDUAL_ALERT_QUANTILE of the OOF residuals
   - dynamic floor    = RESIDUAL_FLOOR_QUANTILE of the OOF residuals
   - absolute floor   = MIN_PHYSICAL_MAE_*_ABSOLUTE (last-resort guardrail)
+
+Downstream contract (v3)
+------------------------
+The screening artifact exposes the cells that failed the gate split by the
+mechanism that excluded them, so downstream consumers can reason about the
+two failure modes independently:
+
+  - gated_out_by_physical: cells whose combined survival <= BURN_IN_DAYS.
+    These never entered the screening cohort in the first place.
+  - gated_out_by_loocv:    cells that survived the physical gate but whose
+    behavioural alert frequency exceeded ALERT_FREQUENCY_THRESHOLD_PCT.
+  - gated_out_cells:       union of the two lists above (legacy key, still
+    populated for backward compatibility with pre-v3 consumers).
 """
 
 import logging
@@ -42,13 +55,19 @@ from src.config import (
     RESIDUAL_FLOOR_QUANTILE,
     XGB_PCE_PARAMS,
     XGB_PFF_PARAMS,
-)   
+)
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("EarlyScreening")
+
+# Schema version of the serialized artifact. Bump when the contract changes.
+#  - v1: legacy, no schema_version field
+#  - v2: added t80_target_metric, t80_target_days, gate_metric
+#  - v3: split gated_out_cells into physical vs LOOCV categories (additive)
+SCREENING_SCHEMA_VERSION = 3
 
 
 # ==============================================================================
@@ -83,6 +102,35 @@ def oof_abs_residuals(
     return np.abs(oof - y.values)
 
 
+def _threshold_components(
+    residuals: np.ndarray,
+    absolute_floor: float,
+) -> Dict[str, float]:
+    """
+    Return the three layers of the alert threshold separately, plus the
+    final layered value.
+
+    The layered threshold is max(alert, dynamic_floor, absolute_floor).
+    Exposing the three components allows diagnostic artefacts to record
+    which layer is active, rather than a single opaque number.
+    """
+    if residuals.size == 0 or np.isnan(residuals).all():
+        return {
+            'alert': np.nan,
+            'dynamic_floor': np.nan,
+            'absolute_floor': absolute_floor,
+            'layered': absolute_floor,
+        }
+    alert_level = float(np.percentile(residuals, RESIDUAL_ALERT_QUANTILE * 100))
+    dynamic_floor = float(np.percentile(residuals, RESIDUAL_FLOOR_QUANTILE * 100))
+    return {
+        'alert': alert_level,
+        'dynamic_floor': dynamic_floor,
+        'absolute_floor': absolute_floor,
+        'layered': max(alert_level, dynamic_floor, absolute_floor),
+    }
+
+
 def _threshold(residuals: np.ndarray, absolute_floor: float) -> float:
     """
     Compute the alert threshold from OOF residuals.
@@ -91,11 +139,8 @@ def _threshold(residuals: np.ndarray, absolute_floor: float) -> float:
     The alert level is the primary criterion; the two floors are guardrails
     that only activate when the model is unusually precise.
     """
-    if residuals.size == 0 or np.isnan(residuals).all():
-        return absolute_floor
-    alert_level = float(np.percentile(residuals, RESIDUAL_ALERT_QUANTILE * 100))
-    dynamic_floor = float(np.percentile(residuals, RESIDUAL_FLOOR_QUANTILE * 100))
-    return max(alert_level, dynamic_floor, absolute_floor)
+    return _threshold_components(residuals, absolute_floor)['layered']
+
 
 def _find_cohort_plateau(
     t80_metrics: pd.DataFrame,
@@ -113,6 +158,9 @@ def _find_cohort_plateau(
 
     Returns (plateau_windows, cohort_set).
     """
+    if not windows:
+        return [], set()
+
     cohorts = {
         w: set(t80_metrics[t80_metrics['combined_survival_days'] > w].index)
         for w in windows
@@ -154,6 +202,7 @@ def _plateau_center(plateau: List[float]) -> float:
     lo, hi = min(plateau), max(plateau)
     center = math.sqrt(lo * hi) if lo > 0 else (lo + hi) / 2
     return min(plateau, key=lambda w: abs(w - center))
+
 
 # ==============================================================================
 # CORE PIPELINE FUNCTIONS
@@ -307,6 +356,18 @@ def execute_loocv_validation(
         thr_pff = _threshold(res_train_pff, MIN_PHYSICAL_MAE_PFF_ABSOLUTE)
 
         # 2. EVALUATION
+        #
+        # Three-state validation status:
+        #   - PASS    : the holdout has data and its alert frequency is below
+        #               ALERT_FREQUENCY_THRESHOLD_PCT.
+        #   - FAIL    : the holdout has data and its alert frequency exceeds
+        #               ALERT_FREQUENCY_THRESHOLD_PCT.
+        #   - NO_DATA : the holdout has zero points in the action window. The
+        #               gate cannot determine whether the cell is healthy or
+        #               anomalous. The fold is kept in the raw record for
+        #               traceability, but is excluded from aggregates and does
+        #               NOT silently count as PASS. Downstream consumers must
+        #               treat these as indeterminate and review manually.
         if len(X_early) > 0:
             underperf_pce = model_pce.predict(X_early) - np.asarray(y_early_pce)
             underperf_pff = model_pff.predict(X_early) - np.asarray(y_early_pff)
@@ -318,10 +379,15 @@ def execute_loocv_validation(
             # pool them across folds to obtain a single global MAE and SE.
             abs_errors_pce = np.abs(underperf_pce).tolist()
             abs_errors_pff = np.abs(underperf_pff).tolist()
+
+            validation_status = (
+                'PASS' if alert_pct <= ALERT_FREQUENCY_THRESHOLD_PCT else 'FAIL'
+            )
         else:
-            alert_pct = 0.0
+            alert_pct = float('nan')
             abs_errors_pce = []
             abs_errors_pff = []
+            validation_status = 'NO_DATA'
 
         loocv_results.append({
             'Holdout_Cell': holdout_cell,
@@ -331,7 +397,7 @@ def execute_loocv_validation(
             'Fold_MAE_PFF': float(np.mean(abs_errors_pff)) if abs_errors_pff else np.nan,
             'Action_Window_Points': len(X_early),
             'Alert_Freq_Pct': float(alert_pct),
-            'Validation_Status': 'PASS' if alert_pct <= ALERT_FREQUENCY_THRESHOLD_PCT else 'FAIL',
+            'Validation_Status': validation_status,
             'Abs_Errors_PCE': abs_errors_pce,
             'Abs_Errors_PFF': abs_errors_pff,
         })
@@ -436,6 +502,31 @@ def generate_diagnostic_summary(
 # ==============================================================================
 # PHASE 1: GRID SEARCH
 # ==============================================================================
+def _empty_grid_row(w: float, cohort_size: int) -> Dict[str, Any]:
+    """
+    Produce a fully-NaN grid row for a candidate window that could not be
+    evaluated (either too few surviving cells or an unexpected error during
+    the evaluation).
+
+    Rationale: the plateau detection downstream uses the full window list.
+    If the grid search silently drops a window from `df_results`, the
+    printed table and the plateau calculation can disagree without warning.
+    Emitting an explicit NaN row keeps the two artefacts consistent.
+    """
+    return {
+        'Window_Days': w,
+        'Healthy_Cells_N': cohort_size,
+        'N_Folds_PCE': 0,
+        'N_Folds_pFF': 0,
+        'Threshold_PCE_Layered': np.nan,
+        'Threshold_pFF_Layered': np.nan,
+        'MAE_PCE': np.nan,
+        'SE_PCE': np.nan,
+        'MAE_pFF': np.nan,
+        'SE_pFF': np.nan,
+    }
+
+
 def run_burn_in_grid_search(
     df: pd.DataFrame,
     t80_metrics: pd.DataFrame,
@@ -452,12 +543,17 @@ def run_burn_in_grid_search(
     This avoids circularity (W chosen by a metric that depends on W) and
     the small-cohort artifact (tiny cohorts trivially achieve low MAE
     because they exclude the difficult cells).
+
+    The threshold columns record the LAYERED threshold for each metric
+    (i.e. max of alert level, dynamic floor, absolute floor), not the raw
+    alert quantile. To inspect the three layers separately, use
+    `_threshold_components` on the OOF residuals of the corresponding W.
     """
     print("\n" + "=" * 80)
     print(" PHASE 1: BURN-IN GRID SEARCH (Structural Cohort Plateau)")
     print("=" * 80)
 
-    results = []
+    results: List[Dict[str, Any]] = []
     for w in windows:
         cohort_w = t80_metrics[t80_metrics['combined_survival_days'] > w].index.tolist()
 
@@ -465,6 +561,7 @@ def run_burn_in_grid_search(
             logger.warning(
                 f"Window {w}d leaves too few healthy cells (N={len(cohort_w)}). Skipping."
             )
+            results.append(_empty_grid_row(w, len(cohort_w)))
             continue
 
         print(f"\n>>> Evaluating candidate window: {w} days (Cohort N={len(cohort_w)}): {cohort_w}")
@@ -476,6 +573,10 @@ def run_burn_in_grid_search(
 
             # MAE pooled from holdout errors is reported for VALIDATION only.
             # It is NOT the selection criterion.
+            #
+            # NO_DATA folds produce Fold_MAE_PCE = NaN, which dropna() removes
+            # before the mean. This keeps indeterminate folds out of the
+            # aggregate without contaminating the statistic.
             per_fold_pce = loocv_df['Fold_MAE_PCE'].dropna().to_numpy()
             per_fold_pff = loocv_df['Fold_MAE_PFF'].dropna().to_numpy()
 
@@ -502,8 +603,8 @@ def run_burn_in_grid_search(
                 'Healthy_Cells_N': len(cohort_w),
                 'N_Folds_PCE': n_folds_pce,
                 'N_Folds_pFF': n_folds_pff,
-                'Q98_PCE_Raw': thresholds.get('pce', np.nan),
-                'Q98_pFF_Raw': thresholds.get('pff', np.nan),
+                'Threshold_PCE_Layered': thresholds.get('pce', np.nan),
+                'Threshold_pFF_Layered': thresholds.get('pff', np.nan),
                 'MAE_PCE': mae_pce,
                 'SE_PCE': se_pce,
                 'MAE_pFF': mae_pff,
@@ -511,8 +612,14 @@ def run_burn_in_grid_search(
             })
         except Exception as e:
             logger.error(f"Error evaluating window of {w} days: {e}")
+            # Emit a NaN row so the grid and the plateau stay aligned.
+            results.append(_empty_grid_row(w, len(cohort_w)))
 
     df_results = pd.DataFrame(results).round(4)
+
+    if df_results.empty:
+        logger.error("No candidate window produced a viable cohort. Aborting.")
+        return df_results
 
     # --- Structural selection ---------------------------------------------
     plateau, plateau_cohort = _find_cohort_plateau(t80_metrics, windows)
@@ -529,7 +636,7 @@ def run_burn_in_grid_search(
         f"\n[PLATEAU] W ∈ {plateau} "
         f"(structural selection, N={len(plateau_cohort)} cells)"
     )
-    if not df_results.empty and df_results['Is_Selected'].any():
+    if df_results['Is_Selected'].any():
         sel = df_results[df_results['Is_Selected']].iloc[0]
         print(
             f"[SELECTED] W={selected_w:.0f}d — geometric midpoint of the "
@@ -589,7 +696,17 @@ def main():
         df_twin_p1, t80_metrics, burn_in_days=BURN_IN_DAYS,
     )
 
-    # 2. Extract cells that physically failed during burn-in
+    # 2. Extract cells that physically failed during burn-in.
+    #
+    # Note: the physical gate is already applied inside
+    # train_and_evaluate_censored_twin when healthy_cells=None (auto-detection
+    # keeps only cells with combined_survival_days > burn_in_days). So by
+    # construction, no cell in `failed_physical` can appear in
+    # `screening_cohort`, and `physical_survivors` is exactly `screening_cohort`.
+    #
+    # The explicit filter below is kept as a defensive check: if the upstream
+    # contract ever changes (e.g. auto-detection switched off), the cohort is
+    # still guaranteed to exclude early-death cells.
     failed_physical = initial_summary[
         initial_summary['combined_survival_days'] <= BURN_IN_DAYS
     ].index.tolist()
@@ -600,11 +717,28 @@ def main():
     loocv_screening = execute_loocv_validation(
         df_twin_p1, physical_survivors, burn_in_days=BURN_IN_DAYS,
     )
+
+    # Explicit FAIL: the cell has data and exceeds the alert-frequency threshold.
     failed_by_loocv = loocv_screening.loc[
-        loocv_screening['Alert_Freq_Pct'] > ALERT_FREQUENCY_THRESHOLD_PCT,
+        loocv_screening['Validation_Status'] == 'FAIL',
         'Holdout_Cell',
     ].tolist()
+
+    # NO_DATA: the cell has no points in the action window. Its status is
+    # indeterminate: we cannot decide whether it is healthy or anomalous.
+    # These cells are NOT evicted automatically, but must be reviewed.
+    no_data_cells = loocv_screening.loc[
+        loocv_screening['Validation_Status'] == 'NO_DATA',
+        'Holdout_Cell',
+    ].tolist()
+
     print(f"[LOOCV GATE] Evicted due to ML Anomalies: {failed_by_loocv}")
+    if no_data_cells:
+        logger.warning(
+            f"[LOOCV GATE] Cells with NO_DATA in the action window: {no_data_cells}. "
+            f"These cells have indeterminate validation status and are NOT evicted "
+            f"by the gate. Review manually before including in production."
+        )
 
     # 4. Define final production cohort
     failed = list(set(failed_physical + failed_by_loocv))
@@ -626,7 +760,12 @@ def main():
     joblib.dump({
         "summary_table": summary_table,
         "screening_cohort": screening_cohort,
+        # Legacy key kept for pre-v3 consumers. Semantically equals the union
+        # of the two split lists below.
         "gated_out_cells": failed,
+        # v3: explicit split of the gate failure modes.
+        "gated_out_by_physical": failed_physical,
+        "gated_out_by_loocv": failed_by_loocv,
         "healthy_cohort": production_cohort,
         "alert_thresholds": final_thresholds,
         "model_pce": dt_models_final['pce'],
@@ -638,7 +777,7 @@ def main():
         # engine models physical PCE damage, so its target is PCE-based.
         # t80_target_days is the pre-computed dict {cell: days} so that
         # downstream modules do not have to re-derive it from t80_metrics.
-        "schema_version": 2,
+        "schema_version": SCREENING_SCHEMA_VERSION,
         "t80_target_metric": "survival_days_pce",
         "t80_target_days": summary_table["survival_days_pce"].to_dict(),
         "gate_metric": "combined_survival_days",

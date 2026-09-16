@@ -38,7 +38,7 @@ logger = logging.getLogger("GateSensitivity")
 
 # Candidate thresholds covering the plausible range. The current value from
 # config is always included and flagged in the output for traceability.
-CANDIDATE_THRESHOLDS = [1.0, 2.0, 5.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0]
+CANDIDATE_THRESHOLDS = [5.0, 10.0, 25.0, 40.0, 50.0]
 
 OUTPUT_PATH = DIAGNOSTICS_SCREENING_DIR / "07_gate_threshold_sensitivity.parquet"
 
