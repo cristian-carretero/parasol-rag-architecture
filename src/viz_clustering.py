@@ -252,13 +252,83 @@ def plot_comparison_heatmaps(
     logger.info(f"Plot saved: {output_path.name}")
     plt.close()
 
+def plot_2d_pca(
+    jv_labeled: pd.DataFrame,
+    curves_normalized: pd.Series,
+    pca_model: PCA,
+    n_clusters: int,
+    filename: str = "05_pca_2d.png",
+) -> None:
+    """
+    Generates a static 2D scatter plot (PNG) of the PCA projection mapped to
+    morphological clusters.
+
+    Requires at least 2 principal components in the analysis PCA. If the
+    pipeline selected only 1, the plot is skipped with a warning rather than
+    fitting an auxiliary PCA, because a 2D projection must reflect the ACTUAL
+    analysis space.
+    """
+    if pca_model.n_components_ < 2:
+        logger.warning(
+            f"Analysis PCA has {pca_model.n_components_} component(s); "
+            f"cannot generate a 2D plot. Skipping."
+        )
+        return
+
+    df_labels = jv_labeled[["cell_id", "curve", "label_curve"]].drop_duplicates()
+    X = np.stack(curves_normalized.tolist())
+
+    X_pca = pca_model.transform(X)[:, :2]
+    var_pct = np.sum(pca_model.explained_variance_ratio_[:2]) * 100
+
+    df_pca = curves_normalized.index.to_frame(index=False)
+    df_pca[["PC1", "PC2"]] = X_pca
+    df_2d = df_pca.merge(df_labels, on=["cell_id", "curve"], how="inner")
+    df_2d["label_curve"] = df_2d["label_curve"].astype(int)
+
+    fig, ax = plt.subplots(figsize=(12, 9), dpi=150)
+
+    colors = plt.cm.viridis(np.linspace(0, 1, n_clusters))
+
+    pruned = df_2d[df_2d["label_curve"] == -1]
+    if not pruned.empty:
+        ax.scatter(
+            pruned["PC1"], pruned["PC2"],
+            s=8, c="#808080", alpha=0.15, edgecolors="none",
+            label=f"Pruned (n={len(pruned)})",
+        )
+
+    for i in range(n_clusters):
+        sub = df_2d[df_2d["label_curve"] == i]
+        if sub.empty:
+            continue
+        ax.scatter(
+            sub["PC1"], sub["PC2"],
+            s=8, c=[colors[i]], alpha=0.55, edgecolors="none",
+            label=f"Cluster {i} (n={len(sub)})",
+        )
+
+    ax.set_xlabel("PC1", fontsize=13)
+    ax.set_ylabel("PC2", fontsize=13)
+    ax.set_title(
+        f"2D PCA Morphological Space ({var_pct:.1f}% Total Variance)",
+        fontsize=15, fontweight="bold",
+    )
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(loc="best", fontsize=10, markerscale=2.5, framealpha=0.9)
+
+    plt.tight_layout()
+    output_path = OUTPUT_DIR / filename
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    logger.info(f"Plot saved: {output_path.name}")
+    plt.close()
 
 def plot_3d_pca_interactive(
     jv_labeled: pd.DataFrame,
     curves_normalized: pd.Series,
     pca_model: PCA,
     n_clusters: int,
-    filename: str = "05_pca_3d_interactive.html",
+    filename: str = "06_pca_3d_interactive.html",
 ) -> None:
     """
     Generates an interactive 3D scatter plot of the PCA projection mapped to
@@ -360,6 +430,13 @@ if __name__ == "__main__":
 
     plot_comparison_heatmaps(
         jv_labeled=jv_labeled,
+        n_clusters=NUM_CLUSTERS,
+    )
+
+    plot_2d_pca(
+        jv_labeled=jv_labeled,
+        curves_normalized=artifacts["curves_normalized"],
+        pca_model=artifacts["pca_model"],
         n_clusters=NUM_CLUSTERS,
     )
 
