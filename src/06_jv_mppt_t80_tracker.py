@@ -65,6 +65,26 @@ def generate_t80_metrics_table(df: pd.DataFrame, irradiance_threshold: float = D
 
     df_daylight = df_proc[df_proc['POA_Irradiance_W_m2'] > irradiance_threshold].copy()
 
+    # Reject physically implausible pFF before daily aggregation.
+    #
+    # pFF is computed on shape-normalized curves. Degenerate curves
+    # (essentially step functions after [0,1] normalization) can produce
+    # pFF up to ~1.0, which has no physical meaning. The empirical
+    # distribution shows a clear gap: normal curves cluster below 0.5,
+    # outliers above 0.9, with nothing in between. A cap at 0.7 sits
+    # inside that gap and excludes the outliers cleanly.
+    #
+    # See src/audit_pff_distribution.py for the diagnostic.
+    PFF_PHYSICAL_MAX = 0.7
+    n_before = len(df_daylight)
+    df_daylight = df_daylight[df_daylight['pFF'] <= PFF_PHYSICAL_MAX].copy()
+    n_dropped = n_before - len(df_daylight)
+    if n_dropped > 0:
+        logger.info(
+            f"Rejected {n_dropped:,} curves with pFF > {PFF_PHYSICAL_MAX} "
+            f"({100 * n_dropped / n_before:.3f}% of daylight curves)"
+        )
+
     # --- PCE TRACKING ---
     df_daily_pce = (
         df_daylight.groupby(['cell_name', 'Date_Day'])
