@@ -1,0 +1,258 @@
+{
+  "burn_in_days": 14.0,
+  "training_cohort": [
+    "A164AB302c",
+    "A167AB344a",
+    "ASLRXAB341",
+    "M83AB302"
+  ],
+  "channel_2ch": [
+    "pce",
+    "pff"
+  ],
+  "channel_4ch": [
+    "pce",
+    "pff",
+    "jsc",
+    "voc"
+  ],
+  "alert_frequency_threshold_pct": 25.0,
+  "per_cell": [
+    {
+      "cell": "P12",
+      "combined_survival_days": 21.97901530935185,
+      "survival_days_pce": 21.97901530935185,
+      "survival_days_pff": 21.97901530935185,
+      "in_training_cohort": false,
+      "gate_physical": false,
+      "freq_2ch_pct": 70.87186261558784,
+      "freq_4ch_pct": 71.4002642007926,
+      "delta_pct": 0.5284015852047617,
+      "n_early_points": 1514,
+      "per_channel_2ch": {
+        "pce": 19.616908850726553,
+        "pff": 70.40951122853369
+      },
+      "per_channel_4ch": {
+        "pce": 19.616908850726553,
+        "pff": 70.40951122853369,
+        "jsc": 22.85336856010568,
+        "voc": 0.7926023778071334
+      },
+      "thresholds_4ch": {
+        "pce": 0.2829335429709837,
+        "pff": 0.20199498471344934,
+        "jsc": 0.3542673897743222,
+        "voc": 0.14407124161720275
+      }
+    },
+    {
+      "cell": "M0",
+      "combined_survival_days": 4.002557685208333,
+      "survival_days_pce": 4.002557685208333,
+      "survival_days_pff": 5.922627765856482,
+      "in_training_cohort": false,
+      "gate_physical": true,
+      "freq_2ch_pct": 49.78165938864629,
+      "freq_4ch_pct": 50.0,
+      "delta_pct": 0.2183406113537103,
+      "n_early_points": 458,
+      "per_channel_2ch": {
+        "pce": 10.698689956331878,
+        "pff": 48.90829694323144
+      },
+      "per_channel_4ch": {
+        "pce": 10.698689956331878,
+        "pff": 48.90829694323144,
+        "jsc": 0.2183406113537118,
+        "voc": 0.2183406113537118
+      },
+      "thresholds_4ch": {
+        "pce": 0.2829335429709837,
+        "pff": 0.20199498471344934,
+        "jsc": 0.3542673897743222,
+        "voc": 0.14407124161720275
+      }
+    },
+    {
+      "cell": "A164AB302c",
+      "combined_survival_days": 28.47956888621528,
+      "survival_days_pce": 28.47956888621528,
+      "survival_days_pff": 78.47763139527778,
+      "in_training_cohort": true,
+      "gate_physical": false,
+      "freq_2ch_pct": 10.745891276864729,
+      "freq_4ch_pct": 11.378002528445005,
+      "delta_pct": 0.6321112515802767,
+      "n_early_points": 791,
+      "per_channel_2ch": {
+        "pce": 3.1605562579013906,
+        "pff": 9.734513274336283
+      },
+      "per_channel_4ch": {
+        "pce": 3.1605562579013906,
+        "pff": 9.734513274336283,
+        "jsc": 0.7585335018963337,
+        "voc": 0.8849557522123894
+      },
+      "thresholds_4ch": {
+        "pce": 0.28605728355338195,
+        "pff": 0.16816213600982988,
+        "jsc": 0.3583781433105469,
+        "voc": 0.1444562649726868
+      }
+    },
+    {
+      "cell": "A170AB302",
+      "combined_survival_days": 6.40129946170139,
+      "survival_days_pce": 6.40129946170139,
+      "survival_days_pff": 10.387847942731481,
+      "in_training_cohort": false,
+      "gate_physical": true,
+      "freq_2ch_pct": 2.849740932642487,
+      "freq_4ch_pct": 4.922279792746114,
+      "delta_pct": 2.0725388601036268,
+      "n_early_points": 386,
+      "per_channel_2ch": {
+        "pce": 1.2953367875647668,
+        "pff": 1.8134715025906736
+      },
+      "per_channel_4ch": {
+        "pce": 1.2953367875647668,
+        "pff": 1.8134715025906736,
+        "jsc": 1.0362694300518134,
+        "voc": 3.626943005181347
+      },
+      "thresholds_4ch": {
+        "pce": 0.2829335429709837,
+        "pff": 0.20199498471344934,
+        "jsc": 0.3542673897743222,
+        "voc": 0.14407124161720275
+      }
+    },
+    {
+      "cell": "A162ALXP01",
+      "combined_survival_days": 9.394881494351852,
+      "survival_days_pce": 9.394881494351852,
+      "survival_days_pff": 29.442371784328706,
+      "in_training_cohort": false,
+      "gate_physical": true,
+      "freq_2ch_pct": 1.7921146953405018,
+      "freq_4ch_pct": 3.942652329749104,
+      "delta_pct": 2.150537634408602,
+      "n_early_points": 558,
+      "per_channel_2ch": {
+        "pce": 0.35842293906810035,
+        "pff": 1.4336917562724014
+      },
+      "per_channel_4ch": {
+        "pce": 0.35842293906810035,
+        "pff": 1.4336917562724014,
+        "jsc": 0.8960573476702509,
+        "voc": 1.971326164874552
+      },
+      "thresholds_4ch": {
+        "pce": 0.2829335429709837,
+        "pff": 0.20199498471344934,
+        "jsc": 0.3542673897743222,
+        "voc": 0.14407124161720275
+      }
+    },
+    {
+      "cell": "M83AB302",
+      "combined_survival_days": 23.176853986006947,
+      "survival_days_pce": 23.176853986006947,
+      "survival_days_pff": Infinity,
+      "in_training_cohort": true,
+      "gate_physical": false,
+      "freq_2ch_pct": 2.0935960591133007,
+      "freq_4ch_pct": 3.9408866995073892,
+      "delta_pct": 1.8472906403940885,
+      "n_early_points": 812,
+      "per_channel_2ch": {
+        "pce": 1.9704433497536946,
+        "pff": 0.12315270935960591
+      },
+      "per_channel_4ch": {
+        "pce": 1.9704433497536946,
+        "pff": 0.12315270935960591,
+        "jsc": 0.3694581280788177,
+        "voc": 1.7241379310344827
+      },
+      "thresholds_4ch": {
+        "pce": 0.23061211923165365,
+        "pff": 0.17731990248056345,
+        "jsc": 0.31401419997215296,
+        "voc": 0.1305227851867676
+      }
+    },
+    {
+      "cell": "ASLRXAB341",
+      "combined_survival_days": 54.334147251874995,
+      "survival_days_pce": 54.334147251874995,
+      "survival_days_pff": Infinity,
+      "in_training_cohort": true,
+      "gate_physical": false,
+      "freq_2ch_pct": 0.6053268765133172,
+      "freq_4ch_pct": 2.4213075060532687,
+      "delta_pct": 1.8159806295399514,
+      "n_early_points": 826,
+      "per_channel_2ch": {
+        "pce": 0.0,
+        "pff": 0.6053268765133172
+      },
+      "per_channel_4ch": {
+        "pce": 0.0,
+        "pff": 0.6053268765133172,
+        "jsc": 0.6053268765133172,
+        "voc": 1.8159806295399517
+      },
+      "thresholds_4ch": {
+        "pce": 0.3685640137008614,
+        "pff": 0.2855389998071083,
+        "jsc": 0.45995893776416774,
+        "voc": 0.13999252319335925
+      }
+    },
+    {
+      "cell": "A167AB344a",
+      "combined_survival_days": 56.28583589537037,
+      "survival_days_pce": 56.28583589537037,
+      "survival_days_pff": Infinity,
+      "in_training_cohort": true,
+      "gate_physical": false,
+      "freq_2ch_pct": 0.7204610951008645,
+      "freq_4ch_pct": 0.8645533141210374,
+      "delta_pct": 0.14409221902017288,
+      "n_early_points": 694,
+      "per_channel_2ch": {
+        "pce": 0.5763688760806917,
+        "pff": 0.1440922190201729
+      },
+      "per_channel_4ch": {
+        "pce": 0.5763688760806917,
+        "pff": 0.1440922190201729,
+        "jsc": 0.1440922190201729,
+        "voc": 0.0
+      },
+      "thresholds_4ch": {
+        "pce": 0.3734640836114249,
+        "pff": 0.28312815961323856,
+        "jsc": 0.37396276593208333,
+        "voc": 0.16333144426345828
+      }
+    }
+  ],
+  "verdict": {
+    "healthy_cluster_max_2ch_pct": 10.745891276864729,
+    "healthy_cluster_max_4ch_pct": 11.378002528445005,
+    "pathological_cluster_min_2ch_pct": 1.7921146953405018,
+    "pathological_cluster_min_4ch_pct": 3.942652329749104,
+    "gap_2ch_pp": -8.953776581524227,
+    "gap_4ch_pp": -7.435350198695902,
+    "early_deaths_rescued": [],
+    "early_deaths_lost": [],
+    "healthy_contaminated_4ch": [],
+    "safe_to_promote": false
+  }
+}

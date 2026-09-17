@@ -260,14 +260,32 @@ def plot_3d_pca_interactive(
     n_clusters: int,
     filename: str = "05_pca_3d_interactive.html",
 ) -> None:
-    """Generates an interactive 3D scatter plot of the PCA projection mapped to morphological clusters."""
+    """
+    Generates an interactive 3D scatter plot of the PCA projection mapped to
+    morphological clusters.
+
+    Note: the clustering pipeline may select fewer than 3 principal components
+    when the dataset is clean enough (e.g. 2 components reach 90% variance).
+    In that case, a dedicated 3-component PCA is fit ONLY for visualization,
+    so the 3D space is populated without altering the analysis model.
+    """
     df_labels = jv_labeled[["cell_id", "curve", "label_curve"]].drop_duplicates()
     X = np.stack(curves_normalized.tolist())
 
-    if pca_model.n_components_ < 3:
-        raise ValueError("The trained PCA model must contain at least 3 components for a 3D plot.")
-
-    X_pca = pca_model.transform(X)[:, :3]
+    # If the analysis PCA has >= 3 components, use it directly.
+    # Otherwise, fit an auxiliary 3-component PCA for visualization.
+    if pca_model.n_components_ >= 3:
+        pca_viz = pca_model
+        X_pca = pca_model.transform(X)[:, :3]
+        var_pct = np.sum(pca_model.explained_variance_ratio_[:3]) * 100
+    else:
+        logger.info(
+            f"Analysis PCA has {pca_model.n_components_} components; "
+            f"fitting an auxiliary 3-component PCA for the 3D plot."
+        )
+        pca_viz = PCA(n_components=3, random_state=42)
+        X_pca = pca_viz.fit_transform(X)
+        var_pct = np.sum(pca_viz.explained_variance_ratio_[:3]) * 100
 
     df_pca = curves_normalized.index.to_frame(index=False)
     df_pca[["PC1", "PC2", "PC3"]] = X_pca
@@ -293,7 +311,7 @@ def plot_3d_pca_interactive(
         opacity=0.75,
         title=(
             f"3D PCA Morphological Space "
-            f"({np.sum(pca_model.explained_variance_ratio_[:3])*100:.1f}% Total Variance)"
+            f"({var_pct:.1f}% Total Variance)"
         ),
     )
     fig.update_traces(marker=dict(size=3.5))

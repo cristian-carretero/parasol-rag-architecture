@@ -172,6 +172,31 @@ TELEMETRY_MERGE_TOLERANCE = pd.Timedelta("20min")
 # ==============================================================================
 # 2. FILTERING / QUALITY CONTROL
 # ==============================================================================
+# --- J-V filter thresholds (module 02) ---
+# Signal-to-noise minimum: current span must exceed this multiple of the
+# instrument noise floor (measured from night-time curves).
+JV_SNR_MIN = 3.0
+
+# Voltage-span ratio minimum: curve sweep must be at least this fraction of
+# the population median for the same cell. Calibrated to match the original
+# filter's v_span_thresh = 50 mV absolute.
+JV_V_SPAN_RATIO_MIN = 0.10
+
+# Spike detection: a point is a spike if |dI| exceeds this fraction of the
+# curve's total current span.
+JV_SPIKE_RELATIVE_THRESHOLD = 0.15
+
+# Absolute count of spike points allowed per curve before rejection.
+# Validated by threshold sweep (src/audit_filter_suite.py --audit 4).
+JV_SPIKE_MAX_POINTS = 2
+
+# Unphysical point ratio threshold: reject only if more than this fraction
+# of points violate I<0 & V<0.5.
+JV_UNPHYSICAL_RATIO_TOL = 0.90
+
+# Fallback noise floor when no night curves are available for estimation.
+JV_FALLBACK_NOISE_FLOOR_I = 1e-7
+
 # Inclusive daylight operational window used to exclude night-time noise from
 # both the QC pipeline and its diagnostic plots.
 OPERATIONAL_HOUR_START = 6
@@ -219,6 +244,39 @@ XAI_PHYSICAL_FEATURES = [
     'Delta_Temp_C_per_h',
     'Delta_Hum_g_m3_per_h'
 ]
+
+
+# Per-curve shape-quality scores computed by module 02, propagated through
+# the pipeline by module 05 as diagnostic columns.
+#
+# CRITICAL: these must NOT be added to FEATURES. The Digital Twin in module
+# 07 predicts healthy PCE/pFF from EXOGENOUS variables (weather, time).
+# Adding endogenous degradation indicators (hysteresis_index, spike_count)
+# would teach the model to expect the degradation it is supposed to detect,
+# collapsing the underperformance signal to zero. These columns feed XAI,
+# the dashboard, and supervised models (08/09), never the unsupervised
+# anomaly detector.
+JV_QUALITY_FEATURES = [
+    'spike_count',
+    'spike_score',
+    'hysteresis_index',
+    'snr_i',
+    'v_span_ratio',
+]
+
+# Physics gate: minimum Voc/Jsc for a curve to be considered a functioning
+# solar cell. A curve with Voc below JV_VOC_MIN_V is not a solar cell,
+# regardless of its shape. Thresholds are conservative: they only capture
+# unambiguous dead cells (Voc ≈ 0), not degraded cells (Voc = 0.4-0.6).
+#
+# Rationale: the shape-based filter (v_span, snr, spikes) cannot detect
+# a curve that sweeps normally but produces no photocurrent. Audit 3
+# showed ~5% of shape-accepted curves have Voc < 0.25 V and Jsc < 1 mA/cm².
+# The 0.2 V / 0.5 mA/cm² thresholds sit below the physical target used by
+# audit_filter_suite.py (0.5 V / 2 mA/cm²), so they only reject cells that
+# are unambiguously dead — cells at the boundary remain accepted.
+JV_VOC_MIN_V = 0.2
+JV_JSC_MIN_MA_CM2 = 0.5
 
 # ==============================================================================
 # 5. EARLY SCREENING / DIGITAL TWIN

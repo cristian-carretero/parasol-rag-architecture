@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np   
 import pandas as pd
 
-from src.config import TELEMETRY_MERGE_TOLERANCE
+from src.config import TELEMETRY_MERGE_TOLERANCE, FILE_JV_FILTERED
 
 # Professional MLOps logging configuration
 logging.basicConfig(
@@ -44,7 +44,41 @@ def build_survival_features(jv_labeled_path: Path, aggregated_path: Path, output
         FF=('ff', 'first'),
         P_mpp=('p_mpp', 'first')
     ).reset_index()
-    
+
+    # --- Attach per-curve shape-quality scores from module 02's audit table ---
+    # These scores (spike_count, hysteresis_index, snr_i, v_span_ratio) are
+    # computed by the J-V filter but stored in a SEPARATE audit parquet, not
+    # in the filtered parquet itself. They propagate through the pipeline as
+    # diagnostic columns for XAI, the dashboard, and downstream supervised
+    # models (08/09).
+    #
+    # They are NOT added to FEATURES and must NOT be added. See config.py::
+    # JV_QUALITY_FEATURES for the contract rationale.
+    audit_path = FILE_JV_FILTERED.parent / "02_filtering_audit.parquet"
+    if audit_path.exists():
+        audit_cols = [
+            'cell_name', 'curve',
+            'spike_count', 'spike_score',
+            'hysteresis_index', 'snr_i', 'v_span_ratio',
+        ]
+        audit_df = pd.read_parquet(audit_path, columns=audit_cols)
+
+        # Clip hysteresis_index: (PCE_rev - PCE_fwd) / PCE_rev explodes when
+        # PCE_rev approaches zero on dead cells. Physical range for perovskite
+        # is [0, ~2]; anything above 5 is numerical artifact.
+        audit_df['hysteresis_index'] = audit_df['hysteresis_index'].clip(lower=0, upper=5.0)
+
+        df_curves = df_curves.merge(audit_df, on=['cell_name', 'curve'], how='left')
+        n_matched = int(df_curves['spike_count'].notna().sum())
+        logger.info(
+            f"Attached J-V quality scores: {n_matched:,} / {len(df_curves):,} "
+            f"curves matched"
+        )
+    else:
+        logger.warning(
+            f"Audit table missing at {audit_path}. Quality scores omitted."
+        )
+
     # Enforce UTC and chronological sort to prevent merge_asof timezone collapse
     df_curves['Timestamp'] = pd.to_datetime(df_curves['Timestamp'], utc=True)
     df_curves = df_curves.sort_values(by=['cell_name', 'Timestamp'])

@@ -15,7 +15,6 @@ from joblib import Parallel, delayed
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-from sklearn.ensemble import IsolationForest
 from sklearn_extra.cluster import KMedoids
 
 from src.config import PCA_TARGET_EXPLAINED_VARIANCE
@@ -339,16 +338,32 @@ def train_kmedoids_pipeline(
     X_train_pca = pca.transform(X_train)
     X_all_pca = pca.transform(X_all)
 
-    # Anomaly Filtration
-    logger.info("Filtering extreme structural noise via Isolation Forest...")
-    iso_forest = IsolationForest(contamination=contamination, random_state=42)
-    clean_mask = (iso_forest.fit_predict(X_all_pca) == 1)
-    
+    # Anomaly Filtration — REMOVED.
+    #
+    # The IsolationForest was a workaround for a gap in module 02: it was
+    # rejecting "dead" curves (Voc≈0, Jsc≈0) that the shape-based filter
+    # could not catch. That gap is now closed by the physics gate in
+    # module 02 (Voc > 0.2 V, Jsc > 0.5 mA/cm²).
+    #
+    # With the physics gate in place, the IsolationForest only rejects
+    # morphological variation that is NOT physically invalid. All clusters
+    # it would reject are already validated by `analyze_cluster_medoids`
+    # (which checks J_sc, J_oc, and monotonicity) and the auto-prune step.
+    # The contamination parameter (whether 0.03 or 'auto') is an arbitrary
+    # quota with no physical justification.
+    #
+    # K-Medoids is inherently robust to outliers by design (it uses medoids,
+    # not means). No pre-filtering is needed.
+    clean_mask = np.ones(len(X_all_pca), dtype=bool)
+
     X_all_cleaned = X_all[clean_mask]
     X_all_pca_cleaned = X_all_pca[clean_mask]
     curves_normalized_cleaned = curves_normalized[clean_mask]
-    
-    logger.info(f"Pre-filter curves: {len(curves_normalized)} | Post-filter valid curves: {len(curves_normalized_cleaned)}")
+
+    logger.info(
+        f"Pre-filter curves: {len(curves_normalized)} | "
+        f"Post-filter (no IF): {len(curves_normalized_cleaned)}"
+    )
 
     # K-Medoids Clustering
     if len(X_all_pca_cleaned) > max_train_samples:
