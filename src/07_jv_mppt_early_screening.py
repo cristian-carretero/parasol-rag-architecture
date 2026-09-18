@@ -760,16 +760,15 @@ def main():
     print(summary_table.to_string())
 
     # --- Cross-version portability ---
-    # Python 3.12 and 3.14 serialize tz-aware datetime64 arrays differently,
-    # which breaks joblib roundtrips across environments (e.g. Streamlit Cloud
-    # runs Python 3.14 while local runs 3.12). Strip tz before pickling so the
-    # artifact is portable across Python/pandas versions.
+    # Python 3.12 and 3.14 handle datetime64 precision differently (ns vs us),
+    # which breaks joblib roundtrips across environments (Streamlit Cloud runs
+    # Python 3.14). The most portable representation is ISO strings: they carry
+    # no dtype metadata and the dashboard already parses them via pd.to_datetime().
     summary_table_to_save = summary_table.copy()
     for col in summary_table_to_save.columns:
         if pd.api.types.is_datetime64_any_dtype(summary_table_to_save[col]):
-            if getattr(summary_table_to_save[col].dt, "tz", None) is not None:
-                summary_table_to_save[col] = summary_table_to_save[col].dt.tz_localize(None)
-                logger.info(f"Stripped timezone from column: {col}")
+            summary_table_to_save[col] = summary_table_to_save[col].astype(str).replace("NaT", None)
+            logger.info(f"Serialized datetime column as ISO string: {col}")
 
     # Save Artifacts for Dashboard integration
     joblib.dump({
