@@ -6,8 +6,13 @@ venv/
 __pycache__/
 *.pyc
 
-# Data (do not version heavy files)
-data/
+# Data — heavy directories stay local; the pre-computed artifacts that the
+# Streamlit dashboard consumes ARE versioned so Streamlit Cloud can serve them.
+data/*
+!data/aggregated/
+!data/dataset/
+!data/screening/
+!data/rul/
 
 # Generated figures — heavy, regenerable from the pipeline
 outputs/figures/
