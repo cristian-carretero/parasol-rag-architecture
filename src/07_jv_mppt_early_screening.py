@@ -759,33 +759,34 @@ def main():
     print("\n--- Final Diagnostic Summary ---")
     print(summary_table.to_string())
 
+    # --- Cross-version portability ---
+    # Python 3.12 and 3.14 serialize tz-aware datetime64 arrays differently,
+    # which breaks joblib roundtrips across environments (e.g. Streamlit Cloud
+    # runs Python 3.14 while local runs 3.12). Strip tz before pickling so the
+    # artifact is portable across Python/pandas versions.
+    summary_table_to_save = summary_table.copy()
+    for col in summary_table_to_save.columns:
+        if pd.api.types.is_datetime64_any_dtype(summary_table_to_save[col]):
+            if getattr(summary_table_to_save[col].dt, "tz", None) is not None:
+                summary_table_to_save[col] = summary_table_to_save[col].dt.tz_localize(None)
+                logger.info(f"Stripped timezone from column: {col}")
+
     # Save Artifacts for Dashboard integration
     joblib.dump({
-        "summary_table": summary_table,
+        "summary_table": summary_table_to_save,
         "screening_cohort": screening_cohort,
-        # Legacy key kept for pre-v3 consumers. Semantically equals the union
-        # of the two split lists below.
         "gated_out_cells": failed,
-        # v3: explicit split of the gate failure modes.
         "gated_out_by_physical": failed_physical,
         "gated_out_by_loocv": failed_by_loocv,
         "healthy_cohort": production_cohort,
         "alert_thresholds": final_thresholds,
         "model_pce": dt_models_final['pce'],
         "model_pff": dt_models_final['pff'],
-        # ---- Downstream contract (v3) --------------------------------
-        # t80_target_metric declares WHICH survival column downstream
-        # modules must use as ground truth for RUL forecasting. The gate
-        # uses 'combined_survival_days' for conservatism, but the RUL
-        # engine models physical PCE damage, so its target is PCE-based.
-        # t80_target_days is the pre-computed dict {cell: days} so that
-        # downstream modules do not have to re-derive it from t80_metrics.
         "schema_version": SCREENING_SCHEMA_VERSION,
         "t80_target_metric": "survival_days_pce",
         "t80_target_days": summary_table["survival_days_pce"].to_dict(),
         "gate_metric": "combined_survival_days",
     }, FILE_SCREENING_ARTIFACTS)
-
     df_twin_final.to_parquet(FILE_HEALTHY_COHORT, engine='pyarrow')
     logger.info("Pipeline execution completed successfully.")
 
